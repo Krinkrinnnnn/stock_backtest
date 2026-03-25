@@ -1,12 +1,15 @@
 """
 Minervini Trend Template Screener
 =================================
-Screens all stocks in NQ100, S&P 500, and Russell 2000
-using Mark Minervini's 8-condition Trend Template.
+Screens all stocks using Mark Minervini's 8-condition Trend Template.
+
+Architecture:
+    Phase 1: Sequential download of all ticker data (single process)
+    Phase 2: Parallel technical analysis (all CPU cores)
+    Phase 3: Print results
 
 Usage:
     python3 minervini_screener.py
-    python3 minervini_screener.py --index nq100
     python3 minervini_screener.py --tickers AAPL NVDA TSLA
 """
 
@@ -17,33 +20,30 @@ from datetime import datetime, timedelta
 import warnings
 import sys
 import os
+import time
 from multiprocessing import Pool, cpu_count
-from functools import partial
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from filters import check_liquidity, check_new_high_rs, LIQUIDITY_PARAMS
+from filters import (
+    check_new_high_rs, 
+    LIQUIDITY_PARAMS,
+    download_all_data, 
+    filter_invalid_tickers,
+    filter_liquidity_batch
+)
 
 warnings.filterwarnings("ignore")
 
-LIQUIDITY_FILTER_ENABLED = os.environ.get("LIQUIDITY_FILTER", "1") == "1"
-NEW_HIGH_RS_FLAG_ENABLED = os.environ.get("NEW_HIGH_RS_FLAG", "1") == "1"
-
 NUM_WORKERS = max(1, cpu_count() - 1)
-
-SCREENER_CONFIG = {
-    "enable_liquidity_filter": LIQUIDITY_FILTER_ENABLED,
-    "enable_new_high_rs": NEW_HIGH_RS_FLAG_ENABLED,
-    "liquidity_params": LIQUIDITY_PARAMS,
-}
 
 
 # ==========================================
 # TICKER SOURCES
 # ==========================================
 
-def get_all_us_tickers():
-    """Load all US stock tickers from tickers.txt file."""
-    tickers_file = os.path.join(os.path.dirname(__file__), "tickers.txt")
+def get_all_us_tickers(filename="tickers.txt"):
+    """Load all US stock tickers from a specific file."""
+    tickers_file = os.path.join(os.path.dirname(__file__), filename)
     if not os.path.exists(tickers_file):
         print(f"Error: {tickers_file} not found. Run tickers.py first.")
         return []
@@ -53,43 +53,55 @@ def get_all_us_tickers():
 
 
 INDEX_MAP = {
-    "all": ("All US Stocks", get_all_us_tickers),
+    "all": ("All US Stocks", lambda: get_all_us_tickers()),
 }
 
 
-def _screen_ticker_worker(ticker):
-    """Worker function for parallel screening."""
+# ==========================================
+# LIQUIDITY CHECK (data-driven, no API calls)
+# ==========================================
+
+def check_liquidity_from_data(ticker, df, params=None):
+    """
+    Check if a ticker passes liquidity criteria using pre-downloaded data.
+    No API calls - uses the data already downloaded.
+    """
+    if params is None:
+        params = LIQUIDITY_PARAMS
+    
+    if df is None or df.empty or len(df) < 5:
+        return False
+    
     try:
-        passed, details = minervini_screener(ticker)
-        details["ticker"] = ticker
-        return passed, details
-    except Exception as e:
-        return False, {"ticker": ticker, "price": 0, "score": 0, "pass": False}
-
-
-def _screen_batch(batch):
-    """Process a batch of tickers."""
-    results = []
-    for ticker in batch:
-        passed, details = _screen_ticker_worker(ticker)
-        results.append((passed, details))
-    return results
-
-
-def _check_liquidity_batch(batch):
-    """Check liquidity for a batch of tickers (for multiprocessing)."""
-    return [t for t in batch if check_liquidity(t)[0]]
+        close = df['Close'].dropna()
+        volume = df['Volume'].dropna()
+        
+        if close.empty or volume.empty:
+            return False
+        
+        latest_price = float(close.iloc[-1])
+        avg_dollar_vol = float((close.tail(params["volume_period"]) * 
+                                volume.tail(params["volume_period"])).mean())
+        
+        passes_price = latest_price >= params["min_price"]
+        passes_volume = avg_dollar_vol >= params["min_avg_volume"]
+        
+        return passes_price and passes_volume
+    except Exception:
+        return False
 
 
 # ==========================================
-# MINERVINI SCREENER
+# PARALLEL WORKER (receives pre-downloaded data)
 # ==========================================
 
-def minervini_screener(ticker, df=None):
+def _screen_ticker_with_data(args):
     """
-    Mark Minervini's 8-condition Trend Template.
-    Returns (pass: bool, details: dict).
+    Screen a single ticker using pre-downloaded data.
+    This is called by the multiprocessing pool - no API calls.
     """
+    ticker, df = args
+    
     details = {
         "ticker": ticker,
         "price": 0,
@@ -116,17 +128,6 @@ def minervini_screener(ticker, df=None):
     }
 
     try:
-        # Fetch market cap and industry from yfinance
-        stock = yf.Ticker(ticker)
-        info = stock.info or {}
-        details["market_cap"] = info.get("marketCap", 0) or 0
-        details["industry"] = info.get("industry", "") or ""
-        
-        if df is None:
-            end_date = datetime.now()
-            start_date = end_date - timedelta(days=365 * 2)
-            df = yf.download(ticker, start=start_date, end=end_date, progress=False)
-
         if df is None or len(df) < 200:
             return False, details
 
@@ -142,18 +143,18 @@ def minervini_screener(ticker, df=None):
         df['SMA_150'] = df[price_col].rolling(window=150).mean()
         df['SMA_200'] = df[price_col].rolling(window=200).mean()
 
-        current_price = df[price_col].iloc[-1]
-        sma_50 = df['SMA_50'].iloc[-1]
-        sma_150 = df['SMA_150'].iloc[-1]
-        sma_200 = df['SMA_200'].iloc[-1]
+        current_price = float(df[price_col].iloc[-1])
+        sma_50 = float(df['SMA_50'].iloc[-1])
+        sma_150 = float(df['SMA_150'].iloc[-1])
+        sma_200 = float(df['SMA_200'].iloc[-1])
 
         # 200-day MA trend (check 20 days ago)
-        sma_200_past = df['SMA_200'].iloc[-20] if len(df) >= 220 else sma_200
+        sma_200_past = float(df['SMA_200'].iloc[-20]) if len(df) >= 220 else sma_200
 
         # 52-week high/low
         df_52w = df.iloc[-252:]
-        high_52w = df_52w[price_col].max()
-        low_52w = df_52w[price_col].min()
+        high_52w = float(df_52w[price_col].max())
+        low_52w = float(df_52w[price_col].min())
 
         # Fill details
         details["price"] = current_price
@@ -167,33 +168,17 @@ def minervini_screener(ticker, df=None):
         details["sma200_trending_up"] = sma_200 > sma_200_past
 
         # --- 8 Condition Checks ---
-
-        # Condition 1: Price > 150MA and Price > 200MA
         details["cond_1"] = current_price > sma_150 and current_price > sma_200
-
-        # Condition 2: 150MA > 200MA
         details["cond_2"] = sma_150 > sma_200
-
-        # Condition 3: 200MA trending up (at least 1 month)
         details["cond_3"] = sma_200 > sma_200_past
-
-        # Condition 4: 50MA > 150MA and 50MA > 200MA
         details["cond_4"] = sma_50 > sma_150 and sma_50 > sma_200
-
-        # Condition 5: Price > 50MA
         details["cond_5"] = current_price > sma_50
-
-        # Condition 6: Price >= 30% above 52-week low
         details["cond_6"] = current_price >= (low_52w * 1.30)
-
-        # Condition 7: Price within 25% of 52-week high
         details["cond_7"] = current_price >= (high_52w * 0.75)
 
-        # Condition 8: RS Rating (simplified: stock outperformed)
-        # We calculate basic RS as price change vs 252 days ago
         if len(df) >= 252:
-            stock_return = (current_price / df[price_col].iloc[-252] - 1) * 100
-            details["cond_8"] = stock_return > 0  # Positive 1-year return
+            stock_return = (current_price / float(df[price_col].iloc[-252]) - 1) * 100
+            details["cond_8"] = stock_return > 0
         else:
             details["cond_8"] = True
 
@@ -208,8 +193,13 @@ def minervini_screener(ticker, df=None):
 
         return details["pass"], details
 
-    except Exception as e:
+    except Exception:
         return False, details
+
+
+def _screen_batch_with_data(batch):
+    """Process a batch of (ticker, df) tuples."""
+    return [_screen_ticker_with_data(args) for args in batch]
 
 
 # ==========================================
@@ -220,13 +210,16 @@ def run_screener(indices=None, tickers=None, config=None):
     """
     Run Minervini Trend Template screener.
     
-    Args:
-        indices: List of index keys (nq100, sp500, russell2000)
-        tickers: Custom list of tickers
-        config: Dict with 'enable_liquidity_filter' and 'enable_new_high_rs' keys
+    Architecture:
+        1. Download all data sequentially (single process)
+        2. Filter for liquidity using downloaded data
+        3. Run technical analysis in parallel (all CPUs)
     """
     if config is None:
-        config = SCREENER_CONFIG
+        config = {
+            "enable_liquidity_filter": True,
+            "enable_new_high_rs": True,
+        }
     
     enable_liquidity = config.get("enable_liquidity_filter", True)
     enable_new_high_rs = config.get("enable_new_high_rs", True)
@@ -243,7 +236,12 @@ def run_screener(indices=None, tickers=None, config=None):
         index_names = ["Custom"]
     else:
         for idx in indices:
-            if idx in INDEX_MAP:
+            if idx == "all":
+                tickers_file = config.get("tickers_file", "tickers.txt")
+                idx_tickers = get_all_us_tickers(tickers_file)
+                all_tickers.extend(idx_tickers)
+                index_names.append(f"File ({tickers_file})")
+            elif idx in INDEX_MAP:
                 name, getter = INDEX_MAP[idx]
                 idx_tickers = getter()
                 all_tickers.extend(idx_tickers)
@@ -254,14 +252,19 @@ def run_screener(indices=None, tickers=None, config=None):
 
     print(f"\n{'='*90}")
     print(f"  MINERVIINI TREND TEMPLATE SCREENER")
-    print(f"  Indices: {', '.join(index_names)}")
+    
+    if config and config.get("tickers_file"):
+        print(f"  Tickers File: {config['tickers_file']}")
+    else:
+        print(f"  Indices: {', '.join(index_names)}")
+        
     print(f"  Total stocks to scan: {len(all_tickers)}")
     print(f"  {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     print(f"{'='*90}")
 
     print(f"\n  Filters:")
     print(f"    Liquidity Filter: {'ON' if enable_liquidity else 'OFF'} (Market Cap > $2B, Vol > $50M)")
-    print(f"    New High RS Flag: {'ON' if enable_new_high_rs else 'OFF'}")
+    print(f"    New High RS Flag: {'ON' if enable_new_high_rs else 'OFF'} (Must be at 52-week RS high for 5 days)")
     
     print(f"\n  Conditions:")
     print(f"    1. Price > 150MA and Price > 200MA")
@@ -273,39 +276,50 @@ def run_screener(indices=None, tickers=None, config=None):
     print(f"    7. Price within 25% of 52-week high")
     print(f"    8. Positive 1-year return")
 
-    passing = []
-    near_passing = []
-    all_results = []
-    liquid_tickers = set()
+    # ==========================================
+    # PHASE 1: Download all data sequentially
+    # ==========================================
+    # Minervini needs ~2 years of data for SMA200 calculations
+    print(f"\n  [Phase 1] Downloading data sequentially (2y period)...")
+    all_data = download_all_data(all_tickers, period="2y", chunk_size=100, pause=0.5)
     
-    # Phase 1: Liquidity filter with multiprocessing
+    # ==========================================
+    # PHASE 2: Filter for liquidity (no API calls)
+    # ==========================================
+    liquid_tickers = set()
     if enable_liquidity:
-        print(f"\n  [Phase 1] Checking liquidity with {NUM_WORKERS} workers...")
-        
-        batch_size = max(1, len(all_tickers) // NUM_WORKERS)
-        batches = [all_tickers[i:i + batch_size] for i in range(0, len(all_tickers), batch_size)]
-        
-        with Pool(NUM_WORKERS) as pool:
-            results = pool.map(_check_liquidity_batch, batches)
-        
-        for r in results:
-            liquid_tickers.update(r)
-        
-        print(f"    Liquid stocks: {len(liquid_tickers)}/{len(all_tickers)}")
+        print(f"\n  [Phase 2] Filtering for liquidity (using downloaded data)...")
+        for ticker, df in all_data.items():
+            if check_liquidity_from_data(ticker, df):
+                liquid_tickers.add(ticker)
+        print(f"    Liquid stocks: {len(liquid_tickers)}/{len(all_data)}")
     else:
-        liquid_tickers = set(all_tickers)
+        liquid_tickers = set(all_data.keys())
+    
+    if not liquid_tickers:
+        print(f"\n  No liquid stocks found. Check data download above.")
+        return pd.DataFrame()
 
-    # Phase 2: Screening with multiprocessing
-    print(f"\n  [Phase 2] Running Minervini screening with {NUM_WORKERS} workers...")
+    # ==========================================
+    # PHASE 3: Parallel technical analysis
+    # ==========================================
+    print(f"\n  [Phase 3] Running Minervini screening with {NUM_WORKERS} workers...")
     liquid_list = list(liquid_tickers)
-    batch_size = max(1, len(liquid_list) // NUM_WORKERS)
-    batches = [liquid_list[i:i + batch_size] for i in range(0, len(liquid_list), batch_size)]
+    
+    # Prepare (ticker, df) tuples for workers
+    worker_data = [(t, all_data[t]) for t in liquid_list if t in all_data]
+    
+    batch_size = max(1, len(worker_data) // NUM_WORKERS)
+    batches = [worker_data[i:i + batch_size] for i in range(0, len(worker_data), batch_size)]
     
     print(f"    Split into {len(batches)} batches...")
     
+    passing = []
+    near_passing = []
     all_results = []
+    
     with Pool(NUM_WORKERS) as pool:
-        for batch_idx, batch_results in enumerate(pool.imap_unordered(_screen_batch, batches)):
+        for batch_idx, batch_results in enumerate(pool.imap_unordered(_screen_batch_with_data, batches)):
             for passed, details in batch_results:
                 ticker = details.get("ticker", "")
                 details["liquidity_pass"] = True
@@ -349,15 +363,10 @@ def run_screener(indices=None, tickers=None, config=None):
     print(f"  {'-'*7} {'-'*8} {'-'*10} {'-'*18} {'-'*8} {'-'*8} {'-'*7} "
           f"{'-'*5} {'-'*5}{'-'*6 if enable_new_high_rs else ''}")
 
-    def fmt(val, details_key):
-        v = details.get(details_key, False) if isinstance(details, dict) else False
-        return " ✓" if v else " ✗"
-
     for d in sorted(all_results, key=lambda x: x["score"], reverse=True):
         if d["price"] == 0:
             continue
-        c = lambda k: " ✓" if d[k] else " ✗"
-        rs_flag = f"  ★" if enable_new_high_rs and d.get("new_high_rs", False) else ""
+        rs_flag = f"  *RS" if enable_new_high_rs and d.get("new_high_rs", False) else ""
         industry = (d.get("industry", "") or "N/A")[:16]
         print(f"  {d['ticker']:<7} ${d['price']:>6.2f} {format_market_cap(d.get('market_cap', 0)):>10} "
               f"{industry:<18} ${d['sma50']:>6.2f} ${d['sma200']:>6.2f} "
@@ -367,19 +376,19 @@ def run_screener(indices=None, tickers=None, config=None):
     # Print passing stocks
     if passing:
         print(f"\n  {'='*96}")
-        print(f"  🚀 MINERVIINI TREND TEMPLATE — PASS ({len(passing)} stocks)")
+        print(f"  [+] MINERVIINI TREND TEMPLATE — PASS ({len(passing)} stocks)")
         print(f"  {'='*96}")
         for d in passing:
-            rs_indicator = " ★RS" if enable_new_high_rs and d.get("new_high_rs", False) else ""
+            rs_indicator = " *RS" if enable_new_high_rs and d.get("new_high_rs", False) else ""
             industry = (d.get("industry", "") or "N/A")[:20]
             mkt_cap = format_market_cap(d.get("market_cap", 0))
-            print(f"  ★ {d['ticker']:<6} ${d['price']:>7.2f}  {mkt_cap:>9}  {industry:<20} "
+            print(f"  * {d['ticker']:<6} ${d['price']:>7.2f}  {mkt_cap:>9}  {industry:<20} "
                   f"52wHi:{d['pct_from_high']:+.1f}%{rs_indicator}")
     else:
         print(f"\n  No stocks passed all 8 conditions.")
 
     if near_passing:
-        print(f"\n  📊 Near-Passing (6-7/8 conditions):")
+        print(f"\n  [!] Near-Passing (6-7/8 conditions):")
         for d in sorted(near_passing, key=lambda x: x["score"], reverse=True)[:20]:
             mkt_cap = format_market_cap(d.get("market_cap", 0))
             print(f"    {d['ticker']:<6} ${d['price']:>7.2f}  {mkt_cap:>9}  Score:{d['score']}/8")

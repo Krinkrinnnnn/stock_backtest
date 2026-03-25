@@ -1,11 +1,15 @@
 """
 Momentum Stock Screener
 =======================
-Screens for stocks with strong momentum characteristics from NQ100, S&P 500, and Russell 2000.
+Screens for stocks with strong momentum characteristics.
+
+Architecture:
+    Phase 1: Sequential download of all ticker data (single process)
+    Phase 2: Filter for liquidity using downloaded data (no API calls)
+    Phase 3: Parallel technical analysis (all CPU cores)
 
 Usage:
     python3 momentum_screener.py
-    python3 momentum_screener.py --index nq100
     python3 momentum_screener.py --tickers AAPL TSLA NVDA
 """
 
@@ -17,8 +21,11 @@ import sys, os
 from multiprocessing import Pool, cpu_count
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from minervini_screener import INDEX_MAP
-from filters import check_liquidity, check_new_high_rs, LIQUIDITY_PARAMS
+from minervini_screener import INDEX_MAP, get_all_us_tickers
+from filters import (
+    check_new_high_rs, LIQUIDITY_PARAMS,
+    download_all_data, filter_invalid_tickers, filter_liquidity_batch
+)
 
 NUM_WORKERS = max(1, cpu_count() - 1)
 
@@ -27,66 +34,58 @@ NUM_WORKERS = max(1, cpu_count() - 1)
 # SCREENER PARAMETERS
 # ==========================================
 SCREENER_PARAMS = {
-    # Momentum filters
-    "min_price_pct_52w_high": 0.85,    # Must be within 15% of 52-week high
-    "min_price_change_1m": 0.05,       # Minimum 5% gain in 1 month
-    "min_price_change_3m": 0.10,       # Minimum 10% gain in 3 months
-    "min_rs_score": 70,                # Minimum RS percentile vs S&P 500
-    "min_rs_line": 1.0,                # Must outperform benchmark
-
-    # Moving average filters
+    "min_price_pct_52w_high": 0.85,
+    "min_price_change_1m": 0.05,
+    "min_price_change_3m": 0.10,
+    "min_rs_score": 70,
+    "min_rs_line": 1.0,
     "sma_short_period": 20,
     "sma_medium_period": 50,
     "sma_long_period": 200,
     "ema_period": 13,
-
-    # Volume filters
-    "min_volume_avg": 500000,          # Minimum average volume
-    "min_volume_ratio": 1.0,           # Current vol / avg vol
-
-    # Price filters
+    "min_volume_avg": 500000,
+    "min_volume_ratio": 1.0,
     "min_price": 20.0,
     "max_price": 10000.0,
-
-    # Data
     "data_period": "1y",
 }
 
 
+# ==========================================
+# LIQUIDITY CHECK (data-driven, no API calls)
+# ==========================================
 
-
-
-def fetch_data(ticker, period="1y"):
-    """Fetch OHLCV data for a single ticker."""
+def check_liquidity_from_data(ticker, df, params=None):
+    """Check liquidity using pre-downloaded data (no API calls)."""
+    if params is None:
+        params = LIQUIDITY_PARAMS
+    
+    if df is None or df.empty or len(df) < 5:
+        return False
+    
     try:
-        stock = yf.Ticker(ticker)
-        df = stock.history(period=period)
-        if df.empty:
-            return None
-        df.columns = [col.capitalize() for col in df.columns]
-        return df
+        close = df['Close'].dropna()
+        volume = df['Volume'].dropna()
+        
+        if close.empty or volume.empty:
+            return False
+        
+        latest_price = float(close.iloc[-1])
+        avg_dollar_vol = float((close.tail(params["volume_period"]) * 
+                                volume.tail(params["volume_period"])).mean())
+        
+        return (latest_price >= params["min_price"] and 
+                avg_dollar_vol >= params["min_avg_volume"])
     except Exception:
-        return None
+        return False
 
 
-def fetch_benchmark(period="1y"):
-    """Fetch S&P 500 benchmark data."""
-    try:
-        spy = yf.Ticker("^GSPC")
-        df = spy.history(period=period)
-        if df.empty:
-            return None
-        df.columns = [col.capitalize() for col in df.columns]
-        return df
-    except Exception:
-        return None
-
+# ==========================================
+# MOMENTUM CALCULATION (pure CPU, no API)
+# ==========================================
 
 def calculate_momentum(df, benchmark_df, params):
-    """
-    Calculate momentum indicators for a stock.
-    Returns a dict with scores and signals.
-    """
+    """Calculate momentum indicators for a stock. Pure CPU math."""
     result = {
         "ticker": None,
         "price": 0,
@@ -100,7 +99,7 @@ def calculate_momentum(df, benchmark_df, params):
         "above_sma20": False,
         "above_sma50": False,
         "above_sma200": False,
-        "sma_alignment": False,  # SMA20 > SMA50 > SMA200
+        "sma_alignment": False,
         "ema_bullish": False,
         "volume_avg": 0,
         "volume_ratio": 0,
@@ -112,34 +111,36 @@ def calculate_momentum(df, benchmark_df, params):
     if df is None or len(df) < 200:
         return result
 
-    # Basic price data
-    price = df['Close'].iloc[-1]
+    # Handle multi-level columns
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+
+    price = float(df['Close'].iloc[-1])
     result["price"] = price
 
-    # Price filters
     if price < params["min_price"] or price > params["max_price"]:
         return result
 
     # 52-week high
     if len(df) >= 252:
-        high_52w = df['High'].rolling(252).max().iloc[-1]
+        high_52w = float(df['High'].rolling(252).max().iloc[-1])
     else:
-        high_52w = df['High'].max()
+        high_52w = float(df['High'].max())
     result["high_52w"] = high_52w
     result["pct_from_52w_high"] = price / high_52w if high_52w > 0 else 0
 
     # Price changes
     if len(df) >= 21:
-        result["change_1m"] = (price / df['Close'].iloc[-21] - 1)
+        result["change_1m"] = (price / float(df['Close'].iloc[-21]) - 1)
     if len(df) >= 63:
-        result["change_3m"] = (price / df['Close'].iloc[-63] - 1)
+        result["change_3m"] = (price / float(df['Close'].iloc[-63]) - 1)
     if len(df) >= 126:
-        result["change_6m"] = (price / df['Close'].iloc[-126] - 1)
+        result["change_6m"] = (price / float(df['Close'].iloc[-126]) - 1)
 
     # Volume
-    vol_avg_20 = df['Volume'].rolling(20).mean().iloc[-1]
+    vol_avg_20 = float(df['Volume'].rolling(20).mean().iloc[-1])
     result["volume_avg"] = vol_avg_20
-    result["volume_ratio"] = df['Volume'].iloc[-1] / vol_avg_20 if vol_avg_20 > 0 else 0
+    result["volume_ratio"] = float(df['Volume'].iloc[-1]) / vol_avg_20 if vol_avg_20 > 0 else 0
 
     # Moving Averages
     sma20 = df['Close'].rolling(params["sma_short_period"]).mean()
@@ -147,58 +148,39 @@ def calculate_momentum(df, benchmark_df, params):
     sma200 = df['Close'].rolling(params["sma_long_period"]).mean()
     ema13 = df['Close'].ewm(span=params["ema_period"], adjust=False).mean()
 
-    result["above_sma20"] = price > sma20.iloc[-1]
-    result["above_sma50"] = price > sma50.iloc[-1]
-    result["above_sma200"] = price > sma200.iloc[-1]
-    result["sma_alignment"] = (sma20.iloc[-1] > sma50.iloc[-1] > sma200.iloc[-1])
-    result["ema_bullish"] = price > ema13.iloc[-1]
+    result["above_sma20"] = price > float(sma20.iloc[-1])
+    result["above_sma50"] = price > float(sma50.iloc[-1])
+    result["above_sma200"] = price > float(sma200.iloc[-1])
+    result["sma_alignment"] = (float(sma20.iloc[-1]) > float(sma50.iloc[-1]) > float(sma200.iloc[-1]))
+    result["ema_bullish"] = price > float(ema13.iloc[-1])
 
     # RS Line vs benchmark
     if benchmark_df is not None and not benchmark_df.empty:
         aligned_bench = benchmark_df.reindex(df.index, method='ffill')
         if not aligned_bench.empty:
-            base_stock = df['Close'].iloc[0]
-            base_bench = aligned_bench['Close'].iloc[0]
+            base_stock = float(df['Close'].iloc[0])
+            base_bench = float(aligned_bench['Close'].iloc[0])
             if base_bench > 0:
                 rs_line = (df['Close'] / base_stock) / (aligned_bench['Close'] / base_bench)
-                result["rs_line"] = rs_line.iloc[-1]
+                result["rs_line"] = float(rs_line.iloc[-1])
 
-                # RS Score (percentile)
-                rs_min = rs_line.rolling(252, min_periods=20).min().iloc[-1]
-                rs_max = rs_line.rolling(252, min_periods=20).max().iloc[-1]
+                rs_min = float(rs_line.rolling(252, min_periods=20).min().iloc[-1])
+                rs_max = float(rs_line.rolling(252, min_periods=20).max().iloc[-1])
                 if rs_max > rs_min:
                     result["rs_score"] = ((result["rs_line"] - rs_min) / (rs_max - rs_min)) * 100
 
-    # Momentum Score (weighted composite)
-    weights = {
-        "near_52w_high": 20,      # Within 15% of 52w high
-        "price_change_1m": 15,    # 1-month performance
-        "price_change_3m": 15,    # 3-month performance
-        "rs_score": 20,           # Relative strength
-        "above_sma50": 10,        # Above 50-day SMA
-        "above_sma200": 10,       # Above 200-day SMA
-        "sma_alignment": 10,      # SMA stacking
-    }
-
+    # Momentum Score
     score = 0
-    if result["pct_from_52w_high"] >= params["min_price_pct_52w_high"]:
-        score += weights["near_52w_high"]
-    if result["change_1m"] >= params["min_price_change_1m"]:
-        score += weights["price_change_1m"]
-    if result["change_3m"] >= params["min_price_change_3m"]:
-        score += weights["price_change_3m"]
-    if result["rs_score"] >= params["min_rs_score"]:
-        score += weights["rs_score"]
-    if result["above_sma50"]:
-        score += weights["above_sma50"]
-    if result["above_sma200"]:
-        score += weights["above_sma200"]
-    if result["sma_alignment"]:
-        score += weights["sma_alignment"]
+    if result["pct_from_52w_high"] >= params["min_price_pct_52w_high"]: score += 20
+    if result["change_1m"] >= params["min_price_change_1m"]: score += 15
+    if result["change_3m"] >= params["min_price_change_3m"]: score += 15
+    if result["rs_score"] >= params["min_rs_score"]: score += 20
+    if result["above_sma50"]: score += 10
+    if result["above_sma200"]: score += 10
+    if result["sma_alignment"]: score += 10
 
     result["momentum_score"] = score
 
-    # Signal: meet core criteria
     conditions = [
         result["pct_from_52w_high"] >= params["min_price_pct_52w_high"],
         result["change_1m"] >= params["min_price_change_1m"],
@@ -207,23 +189,39 @@ def calculate_momentum(df, benchmark_df, params):
         result["rs_score"] >= params["min_rs_score"],
         result["volume_avg"] >= params["min_volume_avg"],
     ]
-
     result["signal"] = all(conditions)
     result["signal_strength"] = sum(conditions) / len(conditions) * 100
 
     return result
 
 
+# ==========================================
+# PARALLEL WORKERS (receive pre-downloaded data)
+# ==========================================
+
+def _screen_momentum_worker(args):
+    ticker, df, benchmark_df, params = args
+    r = calculate_momentum(df, benchmark_df, params)
+    r["ticker"] = ticker
+    return r
+
+
+def _screen_momentum_batch(args_batch):
+    return [_screen_momentum_worker(args) for args in args_batch]
+
+
+# ==========================================
+# SCREENER RUNNER
+# ==========================================
+
 def run_screener(tickers=None, params=None, benchmark_df=None, indices=None, config=None):
     """
-    Run the Momentum screener on a list of tickers.
+    Run Momentum screener.
     
-    Args:
-        tickers: List of stock symbols
-        params: Screener parameters dict
-        benchmark_df: Pre-fetched benchmark data
-        indices: List of index keys to pull tickers from
-        config: Dict with 'enable_liquidity_filter' and 'enable_new_high_rs' keys
+    Architecture:
+        1. Download all data sequentially (single process)
+        2. Filter for liquidity using downloaded data
+        3. Run technical analysis in parallel (all CPUs)
     """
     if params is None:
         params = SCREENER_PARAMS
@@ -244,7 +242,12 @@ def run_screener(tickers=None, params=None, benchmark_df=None, indices=None, con
         tickers = []
         index_names = []
         for idx in indices:
-            if idx in INDEX_MAP:
+            if idx == "all":
+                tickers_file = str(config.get("tickers_file", "tickers.txt"))
+                idx_tickers = get_all_us_tickers(tickers_file)
+                tickers.extend(idx_tickers)
+                index_names.append(f"File ({tickers_file})")
+            elif idx in INDEX_MAP:
                 name, getter = INDEX_MAP[idx]
                 tickers.extend(getter())
                 index_names.append(name)
@@ -255,7 +258,10 @@ def run_screener(tickers=None, params=None, benchmark_df=None, indices=None, con
 
     print(f"\n{'='*90}")
     print(f"  MOMENTUM STOCK SCREENER")
-    print(f"  Indices: {', '.join(index_names)}")
+    if config and config.get("tickers_file"):
+        print(f"  Tickers File: {config['tickers_file']}")
+    else:
+        print(f"  Indices: {', '.join(index_names)}")
     print(f"  Total stocks to scan: {len(tickers)}")
     print(f"  {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     print(f"{'='*90}")
@@ -264,49 +270,52 @@ def run_screener(tickers=None, params=None, benchmark_df=None, indices=None, con
     print(f"    Liquidity Filter: {'ON' if enable_liquidity else 'OFF'} (Market Cap > $2B, Vol > $50M)")
     print(f"    New High RS Flag: {'ON' if enable_new_high_rs else 'OFF'}")
 
-    # Phase 1: Liquidity filter with multiprocessing
+    # ==========================================
+    # PHASE 1: Download all data sequentially
+    # ==========================================
+    print(f"\n  [Phase 1] Downloading data sequentially (1y period)...")
+    all_data = download_all_data(tickers, period="1y", chunk_size=100, pause=0.5)
+
+    # ==========================================
+    # PHASE 2: Filter for liquidity (no API calls)
+    # ==========================================
     liquid_tickers = set()
     if enable_liquidity:
-        print(f"\n  [Phase 1] Checking liquidity with {NUM_WORKERS} workers...")
-        
-        def _check_liquidity_batch(batch):
-            return [t for t in batch if check_liquidity(t)[0]]
-        
-        batch_size = max(1, len(tickers) // NUM_WORKERS)
-        batches = [tickers[i:i + batch_size] for i in range(0, len(tickers), batch_size)]
-        
-        with Pool(NUM_WORKERS) as pool:
-            results = pool.map(_check_liquidity_batch, batches)
-        
-        for r in results:
-            liquid_tickers.update(r)
-        
-        print(f"    Liquid stocks: {len(liquid_tickers)}/{len(tickers)}")
+        print(f"\n  [Phase 2] Filtering for liquidity (using downloaded data)...")
+        for ticker, df in all_data.items():
+            if check_liquidity_from_data(ticker, df):
+                liquid_tickers.add(ticker)
+        print(f"    Liquid stocks: {len(liquid_tickers)}/{len(all_data)}")
     else:
-        liquid_tickers = set(tickers)
+        liquid_tickers = set(all_data.keys())
 
-    # Fetch benchmark
+    if not liquid_tickers:
+        print(f"\n  No liquid stocks found. Check data download above.")
+        return pd.DataFrame()
+
+    # ==========================================
+    # PHASE 3: Fetch benchmark + parallel screening
+    # ==========================================
     if benchmark_df is None:
-        print("\n  [Phase 2] Fetching S&P 500 benchmark data...")
-        benchmark_df = fetch_benchmark(params["data_period"])
+        print(f"\n  [Phase 3] Fetching S&P 500 benchmark data...")
+        try:
+            benchmark_df = yf.download("^GSPC", period=params["data_period"], progress=False)
+            if isinstance(benchmark_df.columns, pd.MultiIndex):
+                benchmark_df.columns = benchmark_df.columns.get_level_values(0)
+            benchmark_df.columns = [col.capitalize() for col in benchmark_df.columns]
+        except Exception:
+            benchmark_df = None
 
     results = []
     signal_stocks = []
 
-    print(f"\n  [Phase 3] Running Momentum screening with {NUM_WORKERS} workers...")
+    print(f"\n  [Phase 4] Running Momentum screening with {NUM_WORKERS} workers...")
     
     liquid_list = list(liquid_tickers)
-    batch_size = max(1, len(liquid_list) // NUM_WORKERS)
-    batches = [liquid_list[i:i + batch_size] for i in range(0, len(liquid_list), batch_size)]
+    worker_data = [(t, all_data[t], benchmark_df, params) for t in liquid_list if t in all_data]
     
-    def _screen_momentum_batch(batch):
-        batch_results = []
-        for ticker in batch:
-            df = fetch_data(ticker, params["data_period"])
-            r = calculate_momentum(df, benchmark_df, params)
-            r["ticker"] = ticker
-            batch_results.append(r)
-        return batch_results
+    batch_size = max(1, len(worker_data) // NUM_WORKERS)
+    batches = [worker_data[i:i + batch_size] for i in range(0, len(worker_data), batch_size)]
     
     with Pool(NUM_WORKERS) as pool:
         batch_results_list = pool.map(_screen_momentum_batch, batches)
@@ -315,7 +324,6 @@ def run_screener(tickers=None, params=None, benchmark_df=None, indices=None, con
         for r in batch_results:
             r["liquidity_pass"] = True
             
-            # Add new high RS flag for signal stocks
             if enable_new_high_rs and r["signal"]:
                 is_new_high, rs_details = check_new_high_rs(r["ticker"], df=None)
                 r["new_high_rs"] = is_new_high
@@ -344,9 +352,9 @@ def run_screener(tickers=None, params=None, benchmark_df=None, indices=None, con
     for r in results:
         if r["price"] == 0:
             continue
-        sma200_str = "  ✓" if r["above_sma200"] else "  ✗"
-        signal_str = "  ✓ BUY" if r["signal"] else "  ---"
-        rs_flag = f"  ★" if enable_new_high_rs and r.get("new_high_rs", False) else ""
+        sma200_str = "  +" if r["above_sma200"] else "  -"
+        signal_str = "  + BUY" if r["signal"] else "  ---"
+        rs_flag = f"  *RS" if enable_new_high_rs and r.get("new_high_rs", False) else ""
         print(f"  {r['ticker']:<7} ${r['price']:>6.2f} {r['pct_from_52w_high']*100:>6.1f}% "
               f"{r['change_1m']*100:>+5.1f} {r['change_3m']*100:>+5.1f} "
               f"{r['rs_score']:>4.0f} {sma200_str:>6} {signal_str:>7} {r['momentum_score']:>5.0f}{rs_flag}")
@@ -354,21 +362,20 @@ def run_screener(tickers=None, params=None, benchmark_df=None, indices=None, con
     # Print top signals
     if signal_stocks:
         print(f"\n  {'='*86}")
-        print(f"  🚀 MOMENTUM SIGNALS ({len(signal_stocks)} stocks)")
+        print(f"  [+] MOMENTUM SIGNALS ({len(signal_stocks)} stocks)")
         print(f"  {'='*86}")
         for r in signal_stocks:
-            rs_indicator = " ★RS" if enable_new_high_rs and r.get("new_high_rs", False) else ""
-            print(f"  ★ {r['ticker']:<6} ${r['price']:>8.2f}  "
+            rs_indicator = " *RS" if enable_new_high_rs and r.get("new_high_rs", False) else ""
+            print(f"  * {r['ticker']:<6} ${r['price']:>8.2f}  "
                   f"52w:{r['pct_from_52w_high']*100:.1f}%  "
                   f"1M:{r['change_1m']*100:+.1f}%  "
                   f"3M:{r['change_3m']*100:+.1f}%  "
                   f"RS:{r['rs_score']:.0f}  Score:{r['momentum_score']:.0f}{rs_indicator}")
     else:
         print(f"\n  No momentum signals found at this time.")
-        # Show near-signals
         near = [r for r in results if r["momentum_score"] >= 60 and r["price"] > 0]
         if near:
-            print(f"\n  📊 Near-Signal Stocks (Score ≥ 60):")
+            print(f"\n  [!] Near-Signal Stocks (Score >= 60):")
             for r in near[:10]:
                 print(f"    {r['ticker']:<6} ${r['price']:>8.2f}  Score:{r['momentum_score']:.0f}")
 

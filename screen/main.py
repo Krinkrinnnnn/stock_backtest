@@ -30,6 +30,7 @@ DEFAULT_CONFIG = {
     # Filters
     "enable_liquidity_filter": True,
     "enable_new_high_rs": True,
+    "enable_correlation_check": True,
     
     # Liquidity parameters
     "liquidity": {
@@ -66,6 +67,7 @@ DEFAULT_CONFIG = {
     
     # Momentum screener params
     "momentum": {
+        "data_period": "1y",
         "min_price_pct_52w_high": 0.85,
         "min_price_change_1m": 0.05,
         "min_price_change_3m": 0.10,
@@ -77,6 +79,7 @@ DEFAULT_CONFIG = {
         "ema_period": 13,
         "min_volume_avg": 500000,
         "min_price": 20.0,
+        "max_price": 10000.0,
     },
     
     # Output
@@ -110,11 +113,12 @@ def run_minervini(config):
     screener_config = {
         "enable_liquidity_filter": config["enable_liquidity_filter"],
         "enable_new_high_rs": config["enable_new_high_rs"],
+        "tickers_file": config.get("tickers_file", "tickers.txt")
     }
     
     result = run_screener(
-        indices=["all"],
-        tickers=None,
+        tickers=config.get("custom_tickers", None),
+        indices=["all"] if not config.get("custom_tickers") else None,
         config=screener_config
     )
     
@@ -131,6 +135,14 @@ def run_minervini(config):
             for t in tickers:
                 f.write(f"{t}\n")
         print(f"\n  Saved: {filepath}")
+        
+        # --- Correlation Check ---
+        if config.get("enable_correlation_check", True) and len(tickers) >= 2:
+            try:
+                from correlation import check_correlation_warnings
+                check_correlation_warnings(tickers, threshold=0.7, days=40)
+            except ImportError:
+                print("  Correlation module not found.")
     
     return result
 
@@ -147,13 +159,14 @@ def run_momentum(config):
     screener_config = {
         "enable_liquidity_filter": config["enable_liquidity_filter"],
         "enable_new_high_rs": config["enable_new_high_rs"],
+        "tickers_file": config.get("tickers_file", "tickers.txt")
     }
     
     result = run_mom_screener(
-        tickers=None,
+        tickers=config.get("custom_tickers", None),
         params=momentum_params,
         benchmark_df=None,
-        indices=["all"],
+        indices=["all"] if not config.get("custom_tickers") else None,
         config=screener_config
     )
     
@@ -170,6 +183,62 @@ def run_momentum(config):
             for t in tickers:
                 f.write(f"{t}\n")
         print(f"\n  Saved: {filepath}")
+        
+        # --- Correlation Check ---
+        if config.get("enable_correlation_check", True) and len(tickers) >= 2:
+            try:
+                from correlation import check_correlation_warnings
+                check_correlation_warnings(tickers, threshold=0.7, days=40)
+            except ImportError:
+                print("  Correlation module not found.")
+    
+    return result
+
+
+def run_vcp(config):
+    """Run VCP screener."""
+    print("\n" + "="*70)
+    print("  RUNNING VCP + RS SCREENER")
+    print("="*70)
+    
+    from vcp_screener import run_screener as run_vcp_screener
+    
+    vcp_params = config["vcp"].copy()
+    screener_config = {
+        "enable_liquidity_filter": config["enable_liquidity_filter"],
+        "enable_new_high_rs": config["enable_new_high_rs"],
+        "tickers_file": config.get("tickers_file", "tickers.txt")
+    }
+    
+    result = run_vcp_screener(
+        tickers=config.get("custom_tickers", None),
+        params=vcp_params,
+        benchmark_df=None,
+        indices=["all"] if not config.get("custom_tickers") else None,
+        config=screener_config
+    )
+    
+    if config.get("save_results", True):
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
+        os.makedirs("screen_result", exist_ok=True)
+        filepath = f"screen_result/screener_vcp_{timestamp}.txt"
+        passing = result[result["signal"] == True] if "signal" in result.columns else result
+        tickers = passing["ticker"].tolist() if hasattr(passing, "tolist") else []
+        with open(filepath, "w") as f:
+            f.write(f"# VCP Screener Results\n")
+            f.write(f"# {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"# Total: {len(tickers)}\n\n")
+            for t in tickers:
+                f.write(f"{t}\n")
+        print(f"\n  Saved: {filepath}")
+        
+        # --- Correlation Check ---
+        if config.get("enable_correlation_check", True) and len(tickers) >= 2:
+            try:
+                from correlation import check_correlation_warnings
+                check_correlation_warnings(tickers, threshold=0.7, days=40)
+            except ImportError:
+                print("  Correlation module not found.")
     
     return result
 
@@ -187,12 +256,14 @@ def run_all_screeners(config):
     print(f"{'#'*70}")
     
     # Run each screener
-    for screener_name in ["minervini", "momentum"]:
+    for screener_name in ["minervini", "momentum", "vcp"]:
         try:
             if screener_name == "minervini":
                 results["minervini"] = run_minervini(config)
             elif screener_name == "momentum":
                 results["momentum"] = run_momentum(config)
+            elif screener_name == "vcp":
+                results["vcp"] = run_vcp(config)
         except Exception as e:
             print(f"Error running {screener_name} screener: {e}")
             results[screener_name] = None
@@ -224,7 +295,7 @@ Examples:
     # Screener selection
     parser.add_argument(
         "--screener", "-s",
-        choices=["minervini", "momentum", "all"],
+        choices=["minervini", "momentum", "vcp", "all"],
         default="all",
         help="Which screener to run (default: all)"
     )
@@ -246,6 +317,11 @@ Examples:
         "--no-rs-flag",
         action="store_true",
         help="Disable new high RS flag"
+    )
+    parser.add_argument(
+        "--no-correlation",
+        action="store_true",
+        help="Disable post-screen correlation analysis"
     )
     
     # Override parameters
@@ -276,6 +352,11 @@ Examples:
         nargs="+",
         help="Custom ticker list (overrides tickers file)"
     )
+    parser.add_argument(
+        "--file",
+        type=str,
+        help="Custom text file with tickers (e.g., custom_list.txt)"
+    )
     
     # Output
     parser.add_argument(
@@ -300,6 +381,8 @@ Examples:
         config["enable_liquidity_filter"] = False
     if args.no_rs_flag:
         config["enable_new_high_rs"] = False
+    if args.no_correlation:
+        config["enable_correlation_check"] = False
     if args.liquidity_min:
         config["liquidity"]["min_market_cap"] = args.liquidity_min
     if args.volume_min:
@@ -311,6 +394,9 @@ Examples:
         config["vcp"]["volatility_max"] = args.volatility_max
     if args.tickers:
         config["custom_tickers"] = args.tickers
+    elif args.file:
+        config["tickers_file"] = args.file
+        
     if args.verbose:
         config["verbose"] = True
     
@@ -321,6 +407,8 @@ Examples:
         run_minervini(config)
     elif args.screener == "momentum":
         run_momentum(config)
+    elif args.screener == "vcp":
+        run_vcp(config)
 
 
 if __name__ == "__main__":

@@ -34,6 +34,102 @@ NEW_HIGH_RS_PARAMS = {
     "confirm_days": 5,      # Must be at new high for this many days
 }
 
+ADR_PARAMS = {
+    "min_adr_percent": 4.0,  # Minimum average daily range > 4%
+    "lookback_days": 20,     # Number of days to average over
+}
+
+# Ticker substrings that indicate invalid/warrant/share classes
+INVALID_TICKER_SUBSTRINGS = ['.W', '-W', '-P', '.P', '-R', '.R', '^', '/', '$', '.U', '.PR', 'PR']
+
+
+def filter_invalid_tickers(tickers):
+    """Pre-filter obviously invalid ticker formats."""
+    valid = []
+    invalid = []
+    for t in tickers:
+        if any(sub in t for sub in INVALID_TICKER_SUBSTRINGS):
+            invalid.append(t)
+        else:
+            valid.append(t)
+    return valid, invalid
+
+
+def download_all_data(tickers, period="1mo", chunk_size=100, pause=0.5):
+    """
+    Download OHLCV data for a large list of tickers sequentially in chunks.
+    
+    This single-threaded approach prevents Yahoo Finance rate-limiting by:
+    - Downloading chunks of `chunk_size` tickers at a time
+    - Pausing between chunks to avoid overwhelming the API
+    - Handling multi-index columns from yfinance
+    
+    Args:
+        tickers: List of stock symbols
+        period: yfinance period string (e.g., "1mo", "3mo", "1y")
+        chunk_size: Number of tickers per download request (default 100)
+        pause: Seconds to pause between chunks (default 0.5)
+        
+    Returns:
+        dict: {ticker: DataFrame} with OHLCV data for each ticker
+    """
+    import time
+    
+    # Pre-filter invalid tickers
+    valid_tickers, _ = filter_invalid_tickers(tickers)
+    
+    if not valid_tickers:
+        print("    No valid tickers to download.")
+        return {}
+    
+    print(f"    Downloading data for {len(valid_tickers)} tickers in chunks of {chunk_size}...")
+    
+    all_data = {}
+    total_chunks = (len(valid_tickers) + chunk_size - 1) // chunk_size
+    
+    for chunk_idx in range(0, len(valid_tickers), chunk_size):
+        chunk = valid_tickers[chunk_idx:chunk_idx + chunk_size]
+        chunk_num = chunk_idx // chunk_size + 1
+        
+        try:
+            raw = yf.download(
+                chunk, 
+                period=period, 
+                progress=False, 
+                group_by="ticker",
+                timeout=30
+            )
+            
+            if raw is None or raw.empty:
+                print(f"      Chunk {chunk_num}/{total_chunks}: No data returned")
+                continue
+            
+            # Parse MultiIndex columns (multi-ticker download)
+            if isinstance(raw.columns, pd.MultiIndex):
+                for t in chunk:
+                    if t in raw.columns.levels[0]:
+                        df = raw[t].dropna(how='all')
+                        if not df.empty and 'Close' in df.columns:
+                            all_data[t] = df
+            else:
+                # Single ticker case
+                if len(chunk) == 1 and not raw.empty:
+                    if 'Close' in raw.columns:
+                        all_data[chunk[0]] = raw
+            
+            print(f"      Chunk {chunk_num}/{total_chunks}: {len(chunk)} tickers "
+                  f"({len([t for t in chunk if t in all_data])} with data)")
+                  
+        except Exception as e:
+            print(f"      Chunk {chunk_num}/{total_chunks}: Failed ({e})")
+        
+        # Pause between chunks to respect rate limits
+        if chunk_idx + chunk_size < len(valid_tickers):
+            time.sleep(pause)
+    
+    print(f"    Download complete: {len(all_data)}/{len(valid_tickers)} tickers with data")
+    return all_data
+
 
 def check_liquidity(ticker, params=None):
     """
@@ -50,7 +146,9 @@ def check_liquidity(ticker, params=None):
         params = LIQUIDITY_PARAMS
     
     # Skip invalid ticker formats (preferred shares, warrants, etc.)
-    if any(c in ticker for c in ['$', '.', '/', '-', 'W', 'PR', 'PB']):
+    # We check for these exact substrings or suffixes, not just any character match
+    invalid_substrings = ['.W', '-W', '-P', '.P', '-R', '.R', '^', '/']
+    if any(sub in ticker for sub in invalid_substrings):
         return False, {"ticker": ticker, "passes": False, "reason": "invalid_format"}
     
     details = {
@@ -221,9 +319,61 @@ def check_new_high_rs(ticker, benchmark_symbol="^GSPC", params=None, df=None):
         return False, details
 
 
+def check_adr(ticker, params=None, df=None):
+    """
+    Check if stock meets Average Daily Range (ADR) > threshold.
+    
+    Args:
+        ticker: Stock symbol
+        params: Optional override parameters
+        df: Pre-fetched stock data (optional)
+        
+    Returns:
+        tuple: (passes: bool, details: dict)
+    """
+    if params is None:
+        params = ADR_PARAMS
+    
+    details = {
+        "ticker": ticker,
+        "adr_percent": 0.0,
+        "min_adr_percent": params["min_adr_percent"],
+        "lookback_days": params["lookback_days"],
+        "passes": False,
+    }
+    
+    try:
+        if df is None:
+            stock = yf.Ticker(ticker)
+            # Fetch enough history for lookback_days
+            df = stock.history(period="3mo")
+        
+        if df is None or len(df) < params["lookback_days"]:
+            return False, details
+        
+        # Ensure we have the required columns
+        if 'High' not in df.columns or 'Low' not in df.columns:
+            return False, details
+        
+        # Calculate Daily Range: (High/Low - 1) * 100
+        df['DR'] = (df['High'] / df['Low'] - 1) * 100
+        
+        # Calculate ADR over the last lookback_days
+        adr = df['DR'].iloc[-params["lookback_days"]:].mean()
+        
+        details["adr_percent"] = adr
+        details["passes"] = adr >= params["min_adr_percent"]
+        
+        return details["passes"], details
+        
+    except Exception as e:
+        return False, details
+
+
 def filter_liquidity_batch(tickers, params=None):
     """
-    Check liquidity for a batch of tickers.
+    Check liquidity for a batch of tickers using a single yfinance download call 
+    to avoid heavy rate-limiting and dramatically speed up Phase 1.
     
     Args:
         tickers: List of stock symbols
@@ -234,13 +384,132 @@ def filter_liquidity_batch(tickers, params=None):
     """
     if params is None:
         params = LIQUIDITY_PARAMS
+        
+    results = {}
+    
+    # Fast initial filtering for obviously bad formats
+    invalid_substrings = ['.W', '-W', '-P', '.P', '-R', '.R', '^', '/', '$', '.U']
+    valid_tickers = []
+    
+    for t in tickers:
+        if any(sub in t for sub in invalid_substrings):
+            results[t] = (False, {"ticker": t, "passes": False, "reason": "invalid_format"})
+        else:
+            valid_tickers.append(t)
+            
+    if not valid_tickers:
+        return results
+
+    try:
+        # Download 1 month of data for the whole batch
+        # This is one single API call to Yahoo, totally bypassing per-ticker rate limits
+        data = yf.download(valid_tickers, period="1mo", progress=False, group_by="ticker")
+        
+        # We need volume and close prices
+        for t in valid_tickers:
+            details = {
+                "ticker": t,
+                "exchange": "Unknown", # Can't get easily from download, assuming valid if it downloads
+                "price": 0,
+                "market_cap": 0, # Skip market cap constraint if using fast batch download
+                "avg_volume_21d": 0,
+                "avg_dollar_volume": 0,
+                "passes": False,
+            }
+            
+            try:
+                # Handle MultiIndex returned by yfinance group_by="ticker"
+                if isinstance(data.columns, pd.MultiIndex):
+                    if t not in data.columns.levels[0]:
+                        results[t] = (False, details)
+                        continue
+                    df = data[t]
+                else:
+                    # Fallback in case yfinance changes behavior
+                    df = data
+                    
+                if df.empty or 'Close' not in df.columns or 'Volume' not in df.columns:
+                    results[t] = (False, details)
+                    continue
+                    
+                df = df.dropna(subset=['Close', 'Volume'])
+                if len(df) < 5:  # Need at least a few days of data
+                    results[t] = (False, details)
+                    continue
+                
+                # Extract values safely extracting scalar from pandas series/frame
+                latest_price = float(df['Close'].iloc[-1])
+                avg_vol = float(df['Volume'].tail(params["volume_period"]).mean())
+                avg_dollar_vol = avg_vol * latest_price
+                
+                details["price"] = latest_price
+                details["avg_volume_21d"] = avg_vol
+                details["avg_dollar_volume"] = avg_dollar_vol
+                
+                # Check parameters
+                passes_price = latest_price >= params["min_price"]
+                passes_volume = avg_dollar_vol >= params["min_avg_volume"]
+                
+                if passes_price and passes_volume:
+                    details["passes"] = True
+                    results[t] = (True, details)
+                else:
+                    results[t] = (False, details)
+            except Exception as e:
+                results[t] = (False, details)
+                
+    except Exception as e:
+        print(f"Batch liquidity download failed: {e}")
+        # Fallback to failing them gracefully
+        for t in valid_tickers:
+            results[t] = (False, {"ticker": t, "passes": False, "reason": "download_failed"})
+
+    return results
+
+
+def filter_adr_batch(tickers, params=None):
+    """
+    Check ADR for a batch of tickers.
+    
+    Args:
+        tickers: List of stock symbols
+        params: Optional override parameters
+        
+    Returns:
+        dict: {ticker: (passes: bool, details: dict)}
+    """
+    if params is None:
+        params = ADR_PARAMS
     
     results = {}
     for ticker in tickers:
-        passes, details = check_liquidity(ticker, params)
+        passes, details = check_adr(ticker, params)
         results[ticker] = (passes, details)
     
     return results
+
+
+def get_adr_passing_tickers(tickers, params=None):
+    """
+    Filter a list of tickers to only those meeting ADR criteria.
+    
+    Args:
+        tickers: List of stock symbols
+        params: Optional override parameters
+        
+    Returns:
+        list: Tickers that pass ADR filter
+    """
+    if params is None:
+        params = ADR_PARAMS
+    
+    passing = []
+    for ticker in tickers:
+        passes, _ = check_adr(ticker, params)
+        if passes:
+            passing.append(ticker)
+    
+    return passing
 
 
 def get_liquid_tickers(tickers, params=None):
@@ -315,5 +584,15 @@ if __name__ == "__main__":
         print(f"  252d RS High: {details['rs_252d_high']:.2f}")
         print(f"  52w RS High: {details['rs_52w_high']:.2f}")
         print(f"  New High RS: {'YES' if is_high else 'NO'}")
+    
+    print("\n" + "="*70)
+    print("  ADR (Average Daily Range) TEST")
+    print("="*70)
+    
+    for ticker in test_tickers:
+        passes, details = check_adr(ticker)
+        print(f"\n{ticker}:")
+        print(f"  ADR: {details['adr_percent']:.2f}%")
+        print(f"  Passes (>={details['min_adr_percent']:.1f}%): {'YES' if passes else 'NO'}")
     
     print("\n" + "="*70)

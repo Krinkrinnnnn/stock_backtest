@@ -11,6 +11,8 @@ build/
 # Output files
 output/
 *.png
+back_test_result/
+screen/screen_result/
 
 # IDE
 .vscode/

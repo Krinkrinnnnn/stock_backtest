@@ -54,7 +54,7 @@ SCREENER_PARAMS = {
 
     # --- Other Parameters ---
     "min_price_pct_52w_high": 0.85,
-    "min_rs_score": 80,                 # Condition 7: RS Rating >= 80
+    "min_rs_score": 60,                 # Condition 7: RS Rating >= 60
     "min_rs_line": 1.0,
     "ema_period": 13,
     "min_volume_ratio": 1.0,
@@ -312,8 +312,8 @@ def run_screener(tickers=None, params=None, benchmark_df=None, indices=None, con
     # ==========================================
     # PHASE 1: Download all data sequentially
     # ==========================================
-    print(f"\n  [Phase 1] Downloading data sequentially (1y period)...")
-    all_data = download_all_data(tickers, period="1y", chunk_size=100, pause=0.5)
+    print(f"\n  [Phase 1] Downloading data sequentially (1mo period)...")
+    all_data = download_all_data(tickers, period="1mo", chunk_size=200, pause=1.0)
 
     # ==========================================
     # PHASE 2: Filter for liquidity (no API calls)

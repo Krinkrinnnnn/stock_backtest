@@ -86,7 +86,7 @@ ADR_PARAMS = {
 }
 
 # Ticker substrings that indicate invalid/warrant/share classes
-INVALID_TICKER_SUBSTRINGS = ['.W', '-W', '-P', '.P', '-R', '.R', '^', '/', '$', '.U', '.PR', 'PR']
+INVALID_TICKER_SUBSTRINGS = ['.W', '-W', '-P', '.P', '-R', '.R', '^', '/', '$', '.U', '.PR', 'PR', '.A', '.B', '.V']
 
 
 def is_etf_or_oil(ticker):
@@ -177,7 +177,7 @@ def download_all_data(tickers, period="1mo", chunk_size=100, pause=0.5):
                 period=period, 
                 progress=False, 
                 group_by="ticker",
-                timeout=30
+                timeout=60
             )
             
             if raw is None or raw.empty:

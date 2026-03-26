@@ -129,12 +129,26 @@ def run_minervini(config):
         print(f"\n  Saved: {filepath}")
         
         # --- Correlation Check ---
-        if config.get("enable_correlation_check", True) and len(tickers) >= 2:
-            try:
-                from correlation import check_correlation_warnings
-                check_correlation_warnings(tickers, threshold=0.7, days=40)
-            except ImportError:
-                print("  Correlation module not found.")
+        # Run on ALL screened tickers (not just passing) to catch sector concentration risk
+        if config.get("enable_correlation_check", True):
+            all_screened = []
+            if result is not None and not result.empty and "ticker" in result.columns:
+                # Include passing + near-passing (score >= 6) tickers
+                if "score" in result.columns:
+                    all_screened = result[result["score"] >= 6]["ticker"].tolist()
+                elif "signal_strength" in result.columns:
+                    all_screened = result[result["signal_strength"] >= 60]["ticker"].tolist()
+                elif "momentum_score" in result.columns:
+                    all_screened = result[result["momentum_score"] >= 60]["ticker"].tolist()
+                else:
+                    all_screened = result["ticker"].tolist()
+            
+            if len(all_screened) >= 2:
+                try:
+                    from correlation import check_correlation_warnings
+                    check_correlation_warnings(all_screened, threshold=0.7, days=40)
+                except ImportError:
+                    print("  Correlation module not found.")
     
     return result
 
@@ -184,15 +198,95 @@ def run_momentum(config):
         print(f"\n  Saved: {filepath}")
         
         # --- Correlation Check ---
-        if config.get("enable_correlation_check", True) and len(tickers) >= 2:
-            try:
-                from correlation import check_correlation_warnings
-                check_correlation_warnings(tickers, threshold=0.7, days=40)
-            except ImportError:
-                print("  Correlation module not found.")
+        # Run on ALL screened tickers (not just passing) to catch sector concentration risk
+        if config.get("enable_correlation_check", True):
+            all_screened = []
+            if result is not None and not result.empty and "ticker" in result.columns:
+                if "momentum_score" in result.columns:
+                    all_screened = result[result["momentum_score"] >= 60]["ticker"].tolist()
+                elif "score" in result.columns:
+                    all_screened = result[result["score"] >= 6]["ticker"].tolist()
+                elif "signal_strength" in result.columns:
+                    all_screened = result[result["signal_strength"] >= 60]["ticker"].tolist()
+                else:
+                    all_screened = result["ticker"].tolist()
+            
+            if len(all_screened) >= 2:
+                try:
+                    from correlation import check_correlation_warnings
+                    check_correlation_warnings(all_screened, threshold=0.7, days=40)
+                except ImportError:
+                    print("  Correlation module not found.")
     
     return result
 
+
+
+def run_vcp(config):
+    """Run VCP + RS screener."""
+    print("\n" + "="*70)
+    print("  RUNNING VCP + RS SCREENER")
+    print("="*70)
+    
+    from vcp_screener import run_screener as run_vcp_screener
+    
+    vcp_params = config["vcp"].copy()
+    screener_config = {
+        "enable_liquidity_filter": config["enable_liquidity_filter"],
+        "enable_new_high_rs": config["enable_new_high_rs"],
+        "tickers_file": config.get("tickers_file", "tickers.txt")
+    }
+    
+    result = run_vcp_screener(
+        tickers=config.get("custom_tickers", None),
+        params=vcp_params,
+        benchmark_df=None,
+        indices=["all"] if not config.get("custom_tickers") else None,
+        config=screener_config
+    )
+    
+    if config.get("save_results", True):
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
+        os.makedirs("screen_result", exist_ok=True)
+        filepath = f"screen_result/screener_vcp_{timestamp}.txt"
+        
+        if result is not None and not result.empty:
+            if "signal" in result.columns:
+                passing = result[result["signal"] == True]
+            elif "pass" in result.columns:
+                passing = result[result["pass"] == True]
+            else:
+                passing = result
+            tickers = sorted(passing["ticker"].tolist()) if "ticker" in passing.columns else []
+        else:
+            tickers = []
+        
+        with open(filepath, "w") as f:
+            for t in tickers:
+                f.write(f"{t}\n")
+        print(f"\n  Saved: {filepath}")
+        
+        # --- Correlation Check ---
+        if config.get("enable_correlation_check", True):
+            all_screened = []
+            if result is not None and not result.empty and "ticker" in result.columns:
+                if "signal_strength" in result.columns:
+                    all_screened = result[result["signal_strength"] >= 60]["ticker"].tolist()
+                elif "score" in result.columns:
+                    all_screened = result[result["score"] >= 6]["ticker"].tolist()
+                elif "momentum_score" in result.columns:
+                    all_screened = result[result["momentum_score"] >= 60]["ticker"].tolist()
+                else:
+                    all_screened = result["ticker"].tolist()
+            
+            if len(all_screened) >= 2:
+                try:
+                    from correlation import check_correlation_warnings
+                    check_correlation_warnings(all_screened, threshold=0.7, days=40)
+                except ImportError:
+                    print("  Correlation module not found.")
+    
+    return result
 
 
 def run_all_screeners(config):
@@ -208,12 +302,14 @@ def run_all_screeners(config):
     print(f"{'#'*70}")
     
     # Run each screener
-    for screener_name in ["minervini", "momentum"]:
+    for screener_name in ["minervini", "momentum", "vcp"]:
         try:
             if screener_name == "minervini":
                 results["minervini"] = run_minervini(config)
             elif screener_name == "momentum":
                 results["momentum"] = run_momentum(config)
+            elif screener_name == "vcp":
+                results["vcp"] = run_vcp(config)
         except Exception as e:
             print(f"Error running {screener_name} screener: {e}")
             results[screener_name] = None
@@ -244,7 +340,7 @@ Examples:
     # Screener selection
     parser.add_argument(
         "--screener", "-s",
-        choices=["minervini", "momentum", "all"],
+        choices=["minervini", "momentum", "vcp", "all"],
         default="all",
         help="Which screener to run (default: all)"
     )
@@ -356,6 +452,8 @@ Examples:
         run_minervini(config)
     elif args.screener == "momentum":
         run_momentum(config)
+    elif args.screener == "vcp":
+        run_vcp(config)
 
 
 if __name__ == "__main__":

@@ -60,7 +60,54 @@ python3 screen/backtest_runner.py --cache-file screen_result/screener_minervini_
 | Screener | Key Criteria |
 |---|---|
 | Minervini | Price > 150MA & 200MA, 200MA trending up, price within 25% of 52w high |
-| Momentum | Within 15% of 52w high, 1M change > 5%, RS Score > 70, ADR > 4% |
+| Momentum | Within 15% of 52w high, 1M change > 5%, RS Score > 70 |
+| VCP + RS | RS Score > 60, volatility < 12%, breakout, positive Force Index |
+| Week 10% Momentum | Price > 15, Price > MA10/MA21/MA50/MA200, 5d gain >= 10%, RS >= 80, $vol >= $50M |
+
+## Daily Screener Tasks
+
+Copy and run these commands for your daily screening workflow:
+
+```bash
+cd C:\Users\williamchung\Documents\offside\Harbor_stock\screen
+
+# Step 1: Update ticker list (run once daily or when needed)
+python tickers.py
+
+# Step 2: Run Weekly 10% Momentum screener on ALL stocks in tickers.txt
+python "week10%_momentum.py"
+
+# Step 3: Run all standard screeners (Minervini + Momentum + VCP)
+python main.py
+
+# Step 4: Standalone correlation check on any list of tickers
+python main.py --check-correlation NVDA AMD ARM AVGO
+```
+
+### Quick Copy Commands
+
+```bash
+# Weekly 10% Momentum (full scan, all 7,000+ stocks)
+cd screen && python "week10%_momentum.py"
+
+# Weekly 10% Momentum (custom tickers only)
+cd screen && python "week10%_momentum.py" --tickers NVDA AMD ARM TSLA
+
+# All screeners at once
+cd screen && python main.py
+
+# Minervini only
+cd screen && python main.py --screener minervini
+
+# VCP + RS only
+cd screen && python main.py --screener vcp
+
+# Momentum only
+cd screen && python main.py --screener momentum
+
+# Correlation check (standalone)
+cd screen && python main.py --check-correlation NVDA AMD ARM AVGO SMCI
+```
 
 ## Filters
 
@@ -87,6 +134,7 @@ Harbor_stock/
 │   ├── filters.py             # Liquidity, ADR, ETF/Oil filters
 │   ├── minervini_screener.py  # Minervini Trend Template
 │   ├── momentum_screener.py   # Momentum
+│   ├── week10%_momentum.py    # Weekly 10% Momentum (7 conditions)
 │   ├── backtest_runner.py     # Screener + Backtest pipeline
 │   └── screen_result/         # Output ticker files
 │

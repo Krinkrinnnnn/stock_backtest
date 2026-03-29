@@ -6,8 +6,8 @@ All parameters are configurable via config.yaml or command line arguments.
 
 Usage:
     python3 main.py                           # Run all screeners with defaults
-    python3 main.py --screener minervini     # Run specific screener
-    python3 main.py --config config.yaml     # Use custom config file
+    python3 main.py --screener stage2         # Run specific screener
+    python3 main.py --config config.yaml      # Use custom config file
     
     # Override parameters
     python3 main.py --liquidity-min 5000000000 --rs-threshold 70
@@ -22,7 +22,7 @@ from datetime import datetime
 SCREEN_DIR = os.path.dirname(os.path.abspath(__file__))
 
 DEFAULT_CONFIG = {
-    "screener": "all",  # minervini, momentum, all
+    "screener": "all",  # stage2, momentum, week10_momentum, all
     
     # Data source
     "tickers_file": "tickers.txt",
@@ -38,8 +38,8 @@ DEFAULT_CONFIG = {
         "min_avg_volume": 50_000_000,    # $50M dollar volume
     },
     
-    # Minervini screener params
-    "minervini": {
+    # Stage 2 screener params
+    "stage2": {
         "cond_1_price_above_ma": True,
         "cond_2_ma150_above_ma200": True,
         "cond_3_ma200_trending_up": True,
@@ -67,6 +67,15 @@ DEFAULT_CONFIG = {
         "max_price": 10000.0,
     },
     
+    # Week 10% momentum screener params
+    "week10_momentum": {
+        "min_price": 15.0,
+        "min_rs_score": 60,
+        "accumulation_days": 5,
+        "accumulation_threshold": 0.10,
+        "min_volume_avg": 50000000,
+    },
+    
     # Output
     "output_dir": "output",
     "save_results": True,
@@ -87,17 +96,16 @@ def load_config(config_file=None):
     return config
 
 
-def run_minervini(config):
-    """Run Minervini Trend Template screener."""
+def run_stage2(config):
+    """Run Stage 2 screener."""
     print("\n" + "="*70)
-    print("  RUNNING MINERVIINI TREND TEMPLATE SCREENER")
+    print("  RUNNING STAGE 2 SCREENER")
     print("="*70)
     
-    from minervini_screener import run_screener
+    from stage2_screener import run_screener
     
     screener_config = {
         "enable_liquidity_filter": config["enable_liquidity_filter"],
-        "enable_new_high_rs": config["enable_new_high_rs"],
         "tickers_file": config.get("tickers_file", "tickers.txt")
     }
     
@@ -110,7 +118,7 @@ def run_minervini(config):
     if config.get("save_results", True):
         timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
         os.makedirs("screen_result", exist_ok=True)
-        filepath = f"screen_result/screener_minervini_{timestamp}.txt"
+        filepath = f"screen_result/screener_stage2_{timestamp}.txt"
         
         if result is not None and not result.empty:
             if "pass" in result.columns:
@@ -129,11 +137,9 @@ def run_minervini(config):
         print(f"\n  Saved: {filepath}")
         
         # --- Correlation Check ---
-        # Run on ALL screened tickers (not just passing) to catch sector concentration risk
         if config.get("enable_correlation_check", True):
             all_screened = []
             if result is not None and not result.empty and "ticker" in result.columns:
-                # Include passing + near-passing (score >= 6) tickers
                 if "score" in result.columns:
                     all_screened = result[result["score"] >= 6]["ticker"].tolist()
                 elif "signal_strength" in result.columns:
@@ -198,7 +204,6 @@ def run_momentum(config):
         print(f"\n  Saved: {filepath}")
         
         # --- Correlation Check ---
-        # Run on ALL screened tickers (not just passing) to catch sector concentration risk
         if config.get("enable_correlation_check", True):
             all_screened = []
             if result is not None and not result.empty and "ticker" in result.columns:
@@ -221,25 +226,26 @@ def run_momentum(config):
     return result
 
 
-
-def run_vcp(config):
-    """Run VCP + RS screener."""
+def run_week10_momentum(config):
+    """Run Week 10% Momentum screener."""
     print("\n" + "="*70)
-    print("  RUNNING VCP + RS SCREENER")
+    print("  RUNNING WEEK 10% MOMENTUM SCREENER")
     print("="*70)
     
-    from vcp_screener import run_screener as run_vcp_screener
+    import week10_momentum
+    from week10_momentum import run_screener as run_wk10_screener
     
-    vcp_params = config["vcp"].copy()
+    wk10_params = config["week10_momentum"].copy()
     screener_config = {
         "enable_liquidity_filter": config["enable_liquidity_filter"],
         "enable_new_high_rs": config["enable_new_high_rs"],
+        "enable_earnings_filter": True,
         "tickers_file": config.get("tickers_file", "tickers.txt")
     }
     
-    result = run_vcp_screener(
+    result = run_wk10_screener(
         tickers=config.get("custom_tickers", None),
-        params=vcp_params,
+        params=wk10_params,
         benchmark_df=None,
         indices=["all"] if not config.get("custom_tickers") else None,
         config=screener_config
@@ -248,7 +254,7 @@ def run_vcp(config):
     if config.get("save_results", True):
         timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
         os.makedirs("screen_result", exist_ok=True)
-        filepath = f"screen_result/screener_vcp_{timestamp}.txt"
+        filepath = f"screen_result/screener_week10_momentum_{timestamp}.txt"
         
         if result is not None and not result.empty:
             if "signal" in result.columns:
@@ -265,26 +271,6 @@ def run_vcp(config):
             for t in tickers:
                 f.write(f"{t}\n")
         print(f"\n  Saved: {filepath}")
-        
-        # --- Correlation Check ---
-        if config.get("enable_correlation_check", True):
-            all_screened = []
-            if result is not None and not result.empty and "ticker" in result.columns:
-                if "signal_strength" in result.columns:
-                    all_screened = result[result["signal_strength"] >= 60]["ticker"].tolist()
-                elif "score" in result.columns:
-                    all_screened = result[result["score"] >= 6]["ticker"].tolist()
-                elif "momentum_score" in result.columns:
-                    all_screened = result[result["momentum_score"] >= 60]["ticker"].tolist()
-                else:
-                    all_screened = result["ticker"].tolist()
-            
-            if len(all_screened) >= 2:
-                try:
-                    from correlation import check_correlation_warnings
-                    check_correlation_warnings(all_screened, threshold=0.7, days=40)
-                except ImportError:
-                    print("  Correlation module not found.")
     
     return result
 
@@ -301,15 +287,14 @@ def run_all_screeners(config):
     print(f"#  New High RS: {'ON' if config['enable_new_high_rs'] else 'OFF'}")
     print(f"{'#'*70}")
     
-    # Run each screener
-    for screener_name in ["minervini", "momentum", "vcp"]:
+    for screener_name in ["stage2", "momentum", "week10_momentum"]:
         try:
-            if screener_name == "minervini":
-                results["minervini"] = run_minervini(config)
+            if screener_name == "stage2":
+                results["stage2"] = run_stage2(config)
             elif screener_name == "momentum":
                 results["momentum"] = run_momentum(config)
-            elif screener_name == "vcp":
-                results["vcp"] = run_vcp(config)
+            elif screener_name == "week10_momentum":
+                results["week10_momentum"] = run_week10_momentum(config)
         except Exception as e:
             print(f"Error running {screener_name} screener: {e}")
             results[screener_name] = None
@@ -329,7 +314,7 @@ def main():
         epilog="""
 Examples:
   python3 main.py                           # Run all screeners
-  python3 main.py --screener minervini       # Run only Minervini
+  python3 main.py --screener stage2         # Run only Stage 2
   python3 main.py --screener momentum       # Run only Momentum
   python3 main.py --no-liquidity            # Disable liquidity filter
   python3 main.py --no-rs-flag              # Disable new high RS flag
@@ -340,7 +325,7 @@ Examples:
     # Screener selection
     parser.add_argument(
         "--screener", "-s",
-        choices=["minervini", "momentum", "vcp", "all"],
+        choices=["stage2", "momentum", "week10_momentum", "all"],
         default="all",
         help="Which screener to run (default: all)"
     )
@@ -384,11 +369,6 @@ Examples:
         "--rs-threshold",
         type=int,
         help="RS score threshold (0-100)"
-    )
-    parser.add_argument(
-        "--volatility-max",
-        type=float,
-        help="Maximum volatility ratio (e.g., 0.12 for 12%%)"
     )
     
     # Tickers
@@ -440,10 +420,8 @@ Examples:
     if args.volume_min:
         config["liquidity"]["min_avg_volume"] = args.volume_min
     if args.rs_threshold:
-        config["vcp"]["rs_score_threshold"] = args.rs_threshold
         config["momentum"]["min_rs_score"] = args.rs_threshold
-    if args.volatility_max:
-        config["vcp"]["volatility_max"] = args.volatility_max
+        config["week10_momentum"]["min_rs_score"] = args.rs_threshold
     if args.tickers:
         config["custom_tickers"] = args.tickers
     elif args.file:
@@ -466,12 +444,12 @@ Examples:
     # Run selected screener(s)
     if args.screener == "all":
         run_all_screeners(config)
-    elif args.screener == "minervini":
-        run_minervini(config)
+    elif args.screener == "stage2":
+        run_stage2(config)
     elif args.screener == "momentum":
         run_momentum(config)
-    elif args.screener == "vcp":
-        run_vcp(config)
+    elif args.screener == "week10_momentum":
+        run_week10_momentum(config)
 
 
 if __name__ == "__main__":

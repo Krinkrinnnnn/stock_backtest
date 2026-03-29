@@ -1,7 +1,7 @@
 """
-Momentum Stock Screener
-=======================
-Screens for stocks with strong momentum characteristics.
+Week 10% Momentum Stock Screener
+================================
+Screens for stocks with strong momentum and 10% weekly accumulation.
 
 Architecture:
     Phase 1: Sequential download of all ticker data (single process)
@@ -9,8 +9,8 @@ Architecture:
     Phase 3: Parallel technical analysis (all CPU cores)
 
 Usage:
-    python3 momentum_screener.py
-    python3 momentum_screener.py --tickers AAPL TSLA NVDA
+    python3 week10_momentum.py
+    python3 week10_momentum.py --tickers AAPL TSLA NVDA
 """
 
 import yfinance as yf
@@ -21,7 +21,7 @@ import sys, os
 from multiprocessing import Pool, cpu_count
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from minervini_screener import INDEX_MAP, get_all_us_tickers
+from stage2_screener import INDEX_MAP, get_all_us_tickers
 from filters import (
     check_new_high_rs, check_earnings, LIQUIDITY_PARAMS,
     download_all_data, filter_invalid_tickers, filter_liquidity_batch
@@ -204,7 +204,7 @@ def calculate_momentum(df, benchmark_df, params):
     if result["above_ma10"] and result["above_ma21"]: score += 15    # Condition 4
     if result["accumulation_pass"]: score += 20                      # Condition 5
     if result["volume_avg"] * price >= params["min_volume_avg"]: score += 10  # Condition 6
-    if result["rs_score"] >= params["min_rs_score"]: score += 15     # Condition 7
+    if result["rs_line"] >= params["min_rs_line"]: score += 15        # Condition 7
 
     result["momentum_score"] = score
 
@@ -215,7 +215,7 @@ def calculate_momentum(df, benchmark_df, params):
         result["above_ma10"] and result["above_ma21"],              # Condition 4: Price > MA10 & MA21
         result["accumulation_pass"],                                # Condition 5: 5d gain >= 10%
         result["volume_avg"] * price >= params["min_volume_avg"],   # Condition 6: 21d avg $volume >= $50M
-        result["rs_score"] >= params["min_rs_score"],               # Condition 7: RS Rating >= 80
+        result["rs_line"] >= params["min_rs_line"],                  # Condition 7: RS Line > 1
     ]
     result["signal"] = all(conditions)
     result["signal_strength"] = sum(conditions) / len(conditions) * 100
@@ -307,7 +307,7 @@ def run_screener(tickers=None, params=None, benchmark_df=None, indices=None, con
     print(f"    4. Price > MA{params['sma_short_period']} & Price > MA{params['sma_mid_period']}")
     print(f"    5. {params['accumulation_days']}-day accumulation >= {params['accumulation_threshold']*100:.0f}%")
     print(f"    6. 21-day avg dollar volume >= ${params['min_volume_avg']/1e6:.0f}M")
-    print(f"    7. RS Rating >= {params['min_rs_score']}")
+    print(f"    7. RS Line > {params['min_rs_line']} (outperforms S&P 500)")
 
     # ==========================================
     # PHASE 1: Download all data sequentially

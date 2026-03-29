@@ -1,0 +1,29 @@
+# Harbor Stock Analysis System - Dependencies
+# Install: pip3 install -r requirements.txt
+
+# Core
+pandas>=2.0
+numpy>=1.24
+
+# Data Source
+yfinance>=0.2.30
+
+# Charting
+matplotlib>=3.7
+mplfinance>=0.12.10
+
+# Backtesting
+backtrader>=1.9.76
+quantstats>=0.0.62
+
+# Configuration
+pyyaml>=6.0
+
+# Scientific
+scipy>=1.11
+
+# Caching (parquet support)
+pyarrow>=14.0
+
+# Web scraping (S&P 500 tickers)
+lxml>=4.9

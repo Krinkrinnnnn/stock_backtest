@@ -1,0 +1,14 @@
+{
+  "Date": "2026-03-29",
+  "Timestamp": "2026-03-29 23:54:23",
+  "Total_Score": 0,
+  "Regime": "Cash is King (Bear Market)",
+  "Metrics": {
+    "Breadth_50MA_Pct": 22.34,
+    "Breadth_200MA_Pct": 46.28,
+    "Net_New_Highs": -23,
+    "Smart_Money_Ratio_Trend": "Bearish (Risk-Off)",
+    "VIX_Level": 31.05
+  },
+  "Recommended_Action": "Cash / Short Bias"
+}

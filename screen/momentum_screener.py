@@ -21,7 +21,7 @@ import sys, os
 from multiprocessing import Pool, cpu_count
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from minervini_screener import INDEX_MAP, get_all_us_tickers
+from stage2_screener import INDEX_MAP, get_all_us_tickers
 from filters import (
     check_new_high_rs, LIQUIDITY_PARAMS,
     download_all_data, filter_invalid_tickers, filter_liquidity_batch,

@@ -47,12 +47,12 @@ cd screen
 python3 tickers.py
 
 # Run all screeners
-python3 main.py
+python3 screen_main.py
 
 # Run specific screener
-python3 main.py --screener minervini
-python3 main.py --screener vcp
-python3 main.py --screener momentum
+python3 screen_main.py --screener stage2
+python3 screen_main.py --screener momentum
+python3 screen_main.py --screener week10_momentum
 ```
 
 ## Common Commands
@@ -61,7 +61,7 @@ python3 main.py --screener momentum
 |---|---|
 | Analyze stock | `python3 main.py --symbol AAPL` |
 | Analyze + backtest | `python3 main.py --symbol NVDA --backtest` |
-| Run screeners | `cd screen && python3 main.py` |
+| Run screeners | `cd screen && python3 screen_main.py` |
 | Update tickers | `cd screen && python3 tickers.py` |
 
 ## Parameter Reference
@@ -76,7 +76,7 @@ python3 main.py --screener momentum
 | `--backtest` | Run backtest | False |
 | `--capital` | Initial capital | 100000 |
 
-### screen/main.py (Screeners)
+### screen_main.py (Screeners)
 
 | Flag | Description | Default |
 |---|---|---|

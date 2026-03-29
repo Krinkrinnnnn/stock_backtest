@@ -1,7 +1,7 @@
 """
-Minervini Trend Template Screener
-=================================
-Screens all stocks using Mark Minervini's 8-condition Trend Template.
+Stage 2 Screener
+================
+Screens all stocks using Mark Minervini's 8-condition Stage 2 trend template.
 
 Architecture:
     Phase 1: Sequential download of all ticker data (single process)
@@ -9,8 +9,8 @@ Architecture:
     Phase 3: Print results
 
 Usage:
-    python3 minervini_screener.py
-    python3 minervini_screener.py --tickers AAPL NVDA TSLA
+    python3 stage2_screener.py
+    python3 stage2_screener.py --tickers AAPL NVDA TSLA
 """
 
 import yfinance as yf
@@ -25,11 +25,8 @@ from multiprocessing import Pool, cpu_count
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from filters import (
-    check_new_high_rs, 
     LIQUIDITY_PARAMS,
     download_all_data, 
-    filter_invalid_tickers,
-    filter_liquidity_batch,
     filter_etf_and_oil
 )
 
@@ -101,13 +98,12 @@ def _screen_ticker_with_data(args):
     Screen a single ticker using pre-downloaded data.
     This is called by the multiprocessing pool - no API calls.
     """
-    ticker, df = args
+    ticker, df, benchmark_df = args
     
     details = {
         "ticker": ticker,
         "price": 0,
         "market_cap": 0,
-        "industry": "",
         "sma50": 0,
         "sma150": 0,
         "sma200": 0,
@@ -116,6 +112,12 @@ def _screen_ticker_with_data(args):
         "pct_from_high": 0,
         "pct_from_low": 0,
         "sma200_trending_up": False,
+        "rs_line": 0,
+        "rs_score": 0,
+        "ret_3m": 0,
+        "ret_6m": 0,
+        "ret_9m": 0,
+        "ret_12m": 0,
         "cond_1": False,
         "cond_2": False,
         "cond_3": False,
@@ -168,6 +170,30 @@ def _screen_ticker_with_data(args):
         details["pct_from_low"] = (current_price / low_52w - 1) * 100
         details["sma200_trending_up"] = sma_200 > sma_200_past
 
+        # RS Line vs benchmark
+        if benchmark_df is not None and not benchmark_df.empty:
+            aligned_bench = benchmark_df.reindex(df.index, method='ffill')
+            if not aligned_bench.empty:
+                base_stock = float(df[price_col].iloc[0])
+                base_bench = float(aligned_bench['Close'].iloc[0])
+                if base_bench > 0:
+                    rs_line = (df[price_col] / base_stock) / (aligned_bench['Close'] / base_bench)
+                    details["rs_line"] = float(rs_line.iloc[-1])
+
+        # Calculate weighted RS score (for percentile ranking later)
+        if len(df) >= 252:
+            now = current_price
+            ret_3m = (now / float(df[price_col].iloc[-63])) - 1 if len(df) >= 63 else 0
+            ret_6m = (now / float(df[price_col].iloc[-126])) - 1 if len(df) >= 126 else 0
+            ret_9m = (now / float(df[price_col].iloc[-189])) - 1 if len(df) >= 189 else 0
+            ret_12m = (now / float(df[price_col].iloc[-252])) - 1
+            
+            details["ret_3m"] = ret_3m
+            details["ret_6m"] = ret_6m
+            details["ret_9m"] = ret_9m
+            details["ret_12m"] = ret_12m
+            details["rs_score"] = (ret_3m * 2) + ret_6m + ret_9m + ret_12m
+
         # --- 8 Condition Checks ---
         details["cond_1"] = current_price > sma_150 and current_price > sma_200
         details["cond_2"] = sma_150 > sma_200
@@ -199,7 +225,7 @@ def _screen_ticker_with_data(args):
 
 
 def _screen_batch_with_data(batch):
-    """Process a batch of (ticker, df) tuples."""
+    """Process a batch of (ticker, df, benchmark_df) tuples."""
     return [_screen_ticker_with_data(args) for args in batch]
 
 
@@ -209,7 +235,7 @@ def _screen_batch_with_data(batch):
 
 def run_screener(indices=None, tickers=None, config=None):
     """
-    Run Minervini Trend Template screener.
+    Run Stage 2 screener.
     
     Architecture:
         1. Download all data sequentially (single process)
@@ -219,11 +245,9 @@ def run_screener(indices=None, tickers=None, config=None):
     if config is None:
         config = {
             "enable_liquidity_filter": True,
-            "enable_new_high_rs": True,
         }
     
     enable_liquidity = config.get("enable_liquidity_filter", True)
-    enable_new_high_rs = config.get("enable_new_high_rs", True)
     
     if indices is None:
         indices = ["all"]
@@ -257,7 +281,7 @@ def run_screener(indices=None, tickers=None, config=None):
         print(f"\n  Excluded {len(excluded_tickers)} ETFs/oil-energy stocks: {', '.join(excluded_tickers[:10])}{'...' if len(excluded_tickers) > 10 else ''}")
 
     print(f"\n{'='*90}")
-    print(f"  MINERVIINI TREND TEMPLATE SCREENER")
+    print(f"  STAGE 2 SCREENER")
     
     if config and config.get("tickers_file"):
         print(f"  Tickers File: {config['tickers_file']}")
@@ -270,7 +294,6 @@ def run_screener(indices=None, tickers=None, config=None):
 
     print(f"\n  Filters:")
     print(f"    Liquidity Filter: {'ON' if enable_liquidity else 'OFF'} (Market Cap > $2B, Vol > $50M)")
-    print(f"    New High RS Flag: {'ON' if enable_new_high_rs else 'OFF'} (Must be at 52-week RS high for 5 days)")
     
     print(f"\n  Conditions:")
     print(f"    1. Price > 150MA and Price > 200MA")
@@ -307,13 +330,23 @@ def run_screener(indices=None, tickers=None, config=None):
         return pd.DataFrame()
 
     # ==========================================
-    # PHASE 3: Parallel technical analysis
+    # PHASE 3: Fetch benchmark + parallel analysis
     # ==========================================
-    print(f"\n  [Phase 3] Running Minervini screening with {NUM_WORKERS} workers...")
+    print(f"\n  [Phase 3] Fetching S&P 500 benchmark data...")
+    benchmark_df = None
+    try:
+        benchmark_df = yf.download("^GSPC", period="2y", progress=False)
+        if isinstance(benchmark_df.columns, pd.MultiIndex):
+            benchmark_df.columns = benchmark_df.columns.get_level_values(0)
+        benchmark_df.columns = [col.capitalize() for col in benchmark_df.columns]
+    except Exception:
+        benchmark_df = None
+
+    print(f"\n  [Phase 4] Running Stage 2 screening with {NUM_WORKERS} workers...")
     liquid_list = list(liquid_tickers)
     
-    # Prepare (ticker, df) tuples for workers
-    worker_data = [(t, all_data[t]) for t in liquid_list if t in all_data]
+    # Prepare (ticker, df, benchmark_df) tuples for workers
+    worker_data = [(t, all_data[t], benchmark_df) for t in liquid_list if t in all_data]
     
     batch_size = max(1, len(worker_data) // NUM_WORKERS)
     batches = [worker_data[i:i + batch_size] for i in range(0, len(worker_data), batch_size)]
@@ -327,18 +360,7 @@ def run_screener(indices=None, tickers=None, config=None):
     with Pool(NUM_WORKERS) as pool:
         for batch_idx, batch_results in enumerate(pool.imap_unordered(_screen_batch_with_data, batches)):
             for passed, details in batch_results:
-                ticker = details.get("ticker", "")
                 details["liquidity_pass"] = True
-                
-                # Add new high RS flag
-                if enable_new_high_rs and passed and ticker:
-                    is_new_high, rs_details = check_new_high_rs(ticker)
-                    details["new_high_rs"] = is_new_high
-                    details["rs_line"] = rs_details.get("rs_line", 0)
-                else:
-                    details["new_high_rs"] = False
-                    details["rs_line"] = 0
-                
                 all_results.append(details)
                 
                 if passed:
@@ -349,6 +371,18 @@ def run_screener(indices=None, tickers=None, config=None):
             print(f"    Batch {batch_idx + 1}/{len(batches)} completed", end="", flush=True)
     
     print(f"\n    Processed {len(all_results)} stocks")
+
+    # Calculate RS Rating (percentile ranking 0-99)
+    valid_results = [d for d in all_results if d["price"] > 0 and d["rs_score"] != 0]
+    if valid_results:
+        scores = [d["rs_score"] for d in valid_results]
+        for d in valid_results:
+            # Calculate percentile rank
+            rank = sum(1 for s in scores if s < d["rs_score"])
+            d["rs_rating"] = int((rank / len(scores)) * 99)
+    else:
+        for d in all_results:
+            d["rs_rating"] = 0
 
     print(f"\n\n  Screening complete: {len(all_results)} stocks analyzed")
 
@@ -363,33 +397,29 @@ def run_screener(indices=None, tickers=None, config=None):
         else:
             return "$0"
     
-    rs_col = " RS>Hi" if enable_new_high_rs else ""
-    print(f"\n  {'Ticker':<7} {'Price':>8} {'MktCap':>10} {'Industry':<18} {'SMA50':>8} {'SMA200':>8} "
-          f"{'52wHi%':>7} {'Score':>5} {'Pass':>5}{rs_col}")
-    print(f"  {'-'*7} {'-'*8} {'-'*10} {'-'*18} {'-'*8} {'-'*8} {'-'*7} "
-          f"{'-'*5} {'-'*5}{'-'*6 if enable_new_high_rs else ''}")
+    print(f"\n  * Only consider RS Rating > 70")
+    print(f"\n  {'Ticker':<7} {'Price':>8} {'MktCap':>10} {'SMA50':>8} {'SMA200':>8} "
+          f"{'52wHi%':>7} {'RS':>4} {'Score':>5} {'Pass':>5}")
+    print(f"  {'-'*7} {'-'*8} {'-'*10} {'-'*8} {'-'*8} {'-'*7} "
+          f"{'-'*4} {'-'*5} {'-'*5}")
 
     for d in sorted(all_results, key=lambda x: x["score"], reverse=True):
         if d["price"] == 0:
             continue
-        rs_flag = f"  *RS" if enable_new_high_rs and d.get("new_high_rs", False) else ""
-        industry = (d.get("industry", "") or "N/A")[:16]
         print(f"  {d['ticker']:<7} ${d['price']:>6.2f} {format_market_cap(d.get('market_cap', 0)):>10} "
-              f"{industry:<18} ${d['sma50']:>6.2f} ${d['sma200']:>6.2f} "
+              f"${d['sma50']:>6.2f} ${d['sma200']:>6.2f} "
               f"{d['pct_from_high']:>+6.1f}% "
-              f"{d['score']:>5}/8 {' PASS' if d['pass'] else '   --':>5}{rs_flag}")
+              f"{d['rs_rating']:>4} {d['score']:>5}/8 {' PASS' if d['pass'] else '   --':>5}")
 
     # Print passing stocks
     if passing:
-        print(f"\n  {'='*96}")
-        print(f"  [+] MINERVIINI TREND TEMPLATE — PASS ({len(passing)} stocks)")
-        print(f"  {'='*96}")
+        print(f"\n  {'='*80}")
+        print(f"  [+] STAGE 2 — PASS ({len(passing)} stocks)")
+        print(f"  {'='*80}")
         for d in passing:
-            rs_indicator = " *RS" if enable_new_high_rs and d.get("new_high_rs", False) else ""
-            industry = (d.get("industry", "") or "N/A")[:20]
             mkt_cap = format_market_cap(d.get("market_cap", 0))
-            print(f"  * {d['ticker']:<6} ${d['price']:>7.2f}  {mkt_cap:>9}  {industry:<20} "
-                  f"52wHi:{d['pct_from_high']:+.1f}%{rs_indicator}")
+            print(f"  * {d['ticker']:<6} ${d['price']:>7.2f}  {mkt_cap:>9}  "
+                  f"52wHi:{d['pct_from_high']:+.1f}%  RS:{d['rs_rating']}")
     else:
         print(f"\n  No stocks passed all 8 conditions.")
 
@@ -407,17 +437,15 @@ def run_screener(indices=None, tickers=None, config=None):
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="Minervini Trend Template Screener")
+    parser = argparse.ArgumentParser(description="Stage 2 Screener")
     parser.add_argument("--index", nargs="+", choices=["nq100", "sp500", "russell2000", "all"],
                         help="Indices to scan")
     parser.add_argument("--tickers", nargs="+", help="Custom ticker list")
     parser.add_argument("--no-liquidity", action="store_true", help="Disable liquidity filter")
-    parser.add_argument("--no-rs-flag", action="store_true", help="Disable new high RS flag")
     args = parser.parse_args()
 
     config = {
         "enable_liquidity_filter": not args.no_liquidity,
-        "enable_new_high_rs": not args.no_rs_flag,
     }
     
     run_screener(indices=args.index, tickers=args.tickers, config=config)

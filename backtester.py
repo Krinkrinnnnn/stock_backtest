@@ -112,6 +112,9 @@ class VCPStrategy(bt.Strategy):
         self.wins = 0
         self.losses = 0
         self.total_pnl = 0
+        
+        # Store trade signals for chart plotting
+        self.trade_signals = []  # List of (date, price, type) tuples
 
     def log(self, txt, dt=None):
         dt = dt or self.datas[0].datetime.date(0)
@@ -128,6 +131,13 @@ class VCPStrategy(bt.Strategy):
                 self.entry_price = order.executed.price
                 self.peak_price = order.executed.price
                 self.holding_days = 0
+                # Record buy signal
+                buy_date = bt.num2date(order.executed.dt)
+                self.trade_signals.append({
+                    'date': buy_date,
+                    'price': order.executed.price,
+                    'type': 'BUY'
+                })
             else:
                 pnl = (order.executed.price - self.entry_price) * abs(order.executed.size)
                 pnl_pct = (order.executed.price / self.entry_price - 1) * 100
@@ -139,6 +149,14 @@ class VCPStrategy(bt.Strategy):
                     self.wins += 1
                 else:
                     self.losses += 1
+                # Record sell signal
+                sell_date = bt.num2date(order.executed.dt)
+                self.trade_signals.append({
+                    'date': sell_date,
+                    'price': order.executed.price,
+                    'type': 'SELL',
+                    'pnl_pct': pnl_pct
+                })
         elif order.status in [order.Canceled, order.Margin, order.Rejected]:
             self.log(f'Order Canceled/Margin/Rejected: {order.Status[order.status]}')
         self.order = None
@@ -524,6 +542,9 @@ def run_backtest(symbol, years=3, initial_capital=100000, params=None, plot=True
         'profit_factor': profit_factor,
         'sortino_ratio': sortino_ratio,
         'recovery_factor': recovery_factor,
+        'trade_signals': strat.trade_signals,
+        'result_dir': child_dir,
+        'df': df,
     }
 
 

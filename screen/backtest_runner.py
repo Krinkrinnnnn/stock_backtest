@@ -6,7 +6,7 @@ Shows top 5 most profitable and top 5 most drawdown.
 
 Usage:
     python3 backtest_runner.py
-    python3 backtest_runner.py --screener minervini
+    python3 backtest_runner.py --screener stage2
     python3 backtest_runner.py --top-k 10
     python3 backtest_runner.py --use-cache          # Use cached results
     python3 backtest_runner.py --cache-file results_2026-03-25_00-30.txt
@@ -20,7 +20,7 @@ from datetime import datetime
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from minervini_screener import run_screener as run_minervini
+from stage2_screener import run_screener as run_stage2
 from momentum_screener import run_screener as run_momentum
 from backtester import run_backtest, VCP_STRATEGY_PARAMS
 
@@ -73,7 +73,7 @@ def list_cache_files():
     return files
 
 
-def run_screener_get_tickers(screener_name="minervini", use_cache=False, cache_file=None):
+def run_screener_get_tickers(screener_name="stage2", use_cache=False, cache_file=None):
     """Run screener and return passing tickers."""
     
     # Try to load from cache
@@ -100,8 +100,8 @@ def run_screener_get_tickers(screener_name="minervini", use_cache=False, cache_f
         "enable_new_high_rs": False,  # Skip for speed
     }
     
-    if screener_name == "minervini":
-        result = run_minervini(indices=["all"], tickers=None, config=config)
+    if screener_name == "stage2":
+        result = run_stage2(indices=["all"], tickers=None, config=config)
     elif screener_name == "momentum":
         result = run_momentum(indices=["all"], tickers=None, config=config)
     else:
@@ -206,7 +206,7 @@ def print_top_results(results, top_k=5):
 
 def main():
     parser = argparse.ArgumentParser(description="Screener + Backtest Pipeline")
-    parser.add_argument("--screener", choices=["minervini", "momentum"], default="minervini")
+    parser.add_argument("--screener", choices=["stage2", "momentum"], default="stage2")
     parser.add_argument("--top-k", type=int, default=5, help="Number of top results to show")
     parser.add_argument("--years", type=int, default=3, help="Backtest years")
     parser.add_argument("--capital", type=float, default=100000, help="Initial capital")

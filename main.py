@@ -1,5 +1,7 @@
 import argparse
 import os
+import pandas as pd
+import numpy as np
 from fetch_data import fetch_stock_data
 from vcp_rs_analyzer import calculate_daily_signals, print_signal_summary
 from chart_plotter import MarketSmithChart
@@ -23,7 +25,8 @@ CONFIG = {
     "initial_capital": 100000,   # Initial capital for backtesting
     
     # Chart Settings
-    "chart_figsize": (18, 12),   # Dimensions of the generated chart
+    "chart_figsize": (22, 16),   # Dimensions of the generated chart (larger for readability)
+    "chart_show_days": 180,      # Number of recent days to show (more visible candles)
     
     # Backtest Settings (override VCP_STRATEGY_PARAMS if needed)
     "custom_params": None,       # None = use default VCP_STRATEGY_PARAMS
@@ -70,28 +73,40 @@ def run_analysis(config):
         print(f"  Breakout Signal: {'Yes' if latest['Signal'] else 'No'}")
 
     # 4. Run Backtest
+    backtest_signals = []
+    bt_result_dir = None
     if config["run_backtest"]:
-        run_backtest(
+        bt_result = run_backtest(
             symbol=symbol,
             years=years,
             initial_capital=config["initial_capital"],
             params=config["custom_params"],
-            plot=False  # Backtrader uses its own plot, don't overlap with our chart
+            plot=False
         )
-        # Skip our custom chart if backtest is enabled
-        return
+        if bt_result:
+            backtest_signals = bt_result.get('trade_signals', [])
+            bt_result_dir = bt_result.get('result_dir', None)
 
-    # 5. Plot Chart
-    if config["enable_plotting"]:
-        chart = MarketSmithChart(figsize=config["chart_figsize"])
+    # 5. Plot Chart (always generate chart)
+    if config["enable_plotting"] or backtest_signals:
+        show_days = config.get("chart_show_days", 180)
+        # For backtest, show more days to see all trade signals
+        if backtest_signals:
+            show_days = 365
+        chart = MarketSmithChart(figsize=config["chart_figsize"], show_days=show_days)
         save_path = None
         if config["save_chart"]:
-            output_dir = "output"
-            os.makedirs(output_dir, exist_ok=True)
-            save_path = os.path.join(output_dir, f"{symbol}_analysis.png")
+            if bt_result_dir:
+                # Save chart in back_test_result folder with summary.txt
+                save_path = os.path.join(bt_result_dir, f"{symbol}_chart.png")
+            else:
+                # Save chart in output folder for non-backtest analysis
+                output_dir = "output"
+                os.makedirs(output_dir, exist_ok=True)
+                save_path = os.path.join(output_dir, f"{symbol}_analysis.png")
         
         print("\nRendering chart...")
-        chart.plot(df_with_signals, symbol, save_path=save_path)
+        chart.plot(df_with_signals, symbol, save_path=save_path, trade_signals=backtest_signals)
 
 
 if __name__ == "__main__":
@@ -116,7 +131,6 @@ if __name__ == "__main__":
     if args.backtest:
         CONFIG["run_backtest"] = True
         CONFIG["years_of_data"] = max(CONFIG["years_of_data"], 3)
-        CONFIG["enable_plotting"] = False
     if args.capital:
         CONFIG["initial_capital"] = args.capital
         

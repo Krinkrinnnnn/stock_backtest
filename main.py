@@ -93,7 +93,7 @@ def run_analysis(config):
         # For backtest, show more days to see all trade signals
         if backtest_signals:
             show_days = 365
-        chart = MarketSmithChart(figsize=config["chart_figsize"], show_days=show_days)
+        chart = MarketSmithChart(show_days=show_days)
         save_path = None
         if config["save_chart"]:
             if bt_result_dir:

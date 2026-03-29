@@ -1,6 +1,6 @@
 """
-Chart Plotter using mplfinance
-==============================
+Chart Plotter using Plotly
+===========================
 Professional stock charts with candlestick, volume, moving averages, RS, and MACD.
 
 Auto-generates:
@@ -10,34 +10,18 @@ Auto-generates:
 
 import pandas as pd
 import numpy as np
-import mplfinance as mpf
-import matplotlib.lines as mlines
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 from diagram_indicators import MovingAverages
-
-
-# Custom style: light theme
-MARKETSMITH_STYLE = mpf.make_mpf_style(
-    base_mpf_style='yahoo',
-    gridstyle='-',
-    gridcolor='#E5E5E5',
-    y_on_right=True,
-    rc={
-        'font.size': 10,
-        'axes.labelsize': 10,
-        'figure.facecolor': '#FFFFFF',
-        'axes.facecolor': '#FFFFFF',
-    }
-)
 
 
 class MarketSmithChart:
     """
-    MarketSmith 風格圖表 (mplfinance)
-    - Auto daily/weekly chart generation
+    Plotly 風格圖表
+    - Candlestick with buy/sell markers (2% offset)
     - Moving Averages (MA20, MA50, EMA13, EMA120)
     - RS Score subplot
     - MACD subplot
-    - Trade signal markers with legend
     """
 
     COLORS = {
@@ -50,15 +34,16 @@ class MarketSmithChart:
         'rs_line': '#0066CC',
         'volume_up': '#00A699',
         'volume_down': '#FF333D',
+        'buy': '#2196F3',
+        'sell': '#FF5252',
     }
 
-    def __init__(self, figsize=(22, 16), show_days=180):
-        self.figsize = figsize
+    def __init__(self, show_days=180):
         self.show_days = show_days
         self.ma = MovingAverages()
 
     def _prepare_data(self, df):
-        """Prepare DataFrame for mplfinance"""
+        """Prepare DataFrame"""
         df = df.copy()
         required = ['Open', 'High', 'Low', 'Close', 'Volume']
         for col in required:
@@ -66,164 +51,10 @@ class MarketSmithChart:
                 df[col] = 0
         return df
 
-    def _get_addplots(self, df):
-        """Build addplot objects for overlays and subplots"""
-        addplots = []
-
-        # Moving Averages on main panel
-        for col, color, style, width in [
-            ('MA20', self.COLORS['ma20'], '-', 1.2),
-            ('MA50', self.COLORS['ma50'], '-', 1.5),
-            ('EMA13', self.COLORS['ema13'], '--', 1.0),
-            ('EMA120', self.COLORS['ema120'], '--', 1.0),
-        ]:
-            if col in df.columns:
-                addplots.append(mpf.make_addplot(
-                    df[col], color=color, linestyle=style, width=width,
-                    panel=0, ylabel='Price'
-                ))
-
-        # RS Score or RS Line on panel 2
-        if 'RS_Score' in df.columns:
-            addplots.append(mpf.make_addplot(
-                df['RS_Score'], color=self.COLORS['rs_line'], width=1.5,
-                panel=2, ylabel='RS Score'
-            ))
-            addplots.append(mpf.make_addplot(
-                pd.Series(70, index=df.index), color='#FF6600', linestyle=':',
-                width=1, panel=2
-            ))
-        elif 'RS_Line' in df.columns:
-            addplots.append(mpf.make_addplot(
-                df['RS_Line'], color=self.COLORS['rs_line'], width=1.5,
-                panel=2, ylabel='RS Line'
-            ))
-
-        # MACD on panel 3
-        close = df['Close']
-        ema12 = close.ewm(span=12, adjust=False).mean()
-        ema26 = close.ewm(span=26, adjust=False).mean()
-        macd_line = ema12 - ema26
-        signal_line = macd_line.ewm(span=9, adjust=False).mean()
-        macd_hist = macd_line - signal_line
-
-        addplots.append(mpf.make_addplot(
-            macd_line, color='#2196F3', width=1.2, panel=3, ylabel='MACD'
-        ))
-        addplots.append(mpf.make_addplot(
-            signal_line, color='#FF9800', width=1.2, panel=3
-        ))
-        hist_colors = [self.COLORS['bullish'] if v >= 0 else self.COLORS['bearish'] for v in macd_hist]
-        addplots.append(mpf.make_addplot(
-            macd_hist, type='bar', color=hist_colors, panel=3, alpha=0.5
-        ))
-
-        # VCP Signal markers
-        if 'VCP_Signal' in df.columns:
-            vcp_markers = pd.Series(np.nan, index=df.index)
-            vcp_signals = df[df['VCP_Signal'] == True]
-            if not vcp_signals.empty:
-                for idx in vcp_signals.index:
-                    vcp_markers.loc[idx] = df.loc[idx, 'Close'] * 1.02
-                addplots.append(mpf.make_addplot(
-                    vcp_markers, scatter=True, marker='^', color='#FFA726',
-                    markersize=80, panel=0
-                ))
-
-        # Buy Signal markers
-        if 'Signal' in df.columns:
-            buy_markers = pd.Series(np.nan, index=df.index)
-            buy_signals = df[df['Signal'] == True]
-            if not buy_signals.empty:
-                for idx in buy_signals.index:
-                    buy_markers.loc[idx] = df.loc[idx, 'Close'] * 1.02
-                addplots.append(mpf.make_addplot(
-                    buy_markers, scatter=True, marker='*', color='#66BB6A',
-                    markersize=200, panel=0
-                ))
-
-        return addplots
-
-    def _add_trade_signals(self, df, trade_signals, addplots):
-        """Add backtest trade signals (BUY/SELL markers) to chart"""
-        if not trade_signals:
-            return addplots
-        
-        buy_markers = pd.Series(np.nan, index=df.index)
-        sell_markers = pd.Series(np.nan, index=df.index)
-        
-        df_tz = df.index.tz
-        df_index_naive = df.index.tz_localize(None) if df_tz is not None else df.index
-        
-        for signal in trade_signals:
-            sig_date = pd.Timestamp(signal['date'])
-            if sig_date.tz is not None:
-                sig_date = sig_date.tz_localize(None)
-            
-            matching = df_index_naive[df_index_naive >= sig_date]
-            if len(matching) > 0:
-                idx_naive = matching[0]
-                idx = idx_naive.tz_localize(df_tz) if df_tz is not None else idx_naive
-                
-                if signal['type'] == 'BUY':
-                    buy_markers.loc[idx] = df.loc[idx, 'Low'] * 0.98
-                    print(f"  BUY  {idx_naive.strftime('%Y-%m-%d')} @ ${signal['price']:.2f}")
-                elif signal['type'] == 'SELL':
-                    sell_markers.loc[idx] = df.loc[idx, 'High'] * 1.02
-                    pnl = signal.get('pnl_pct', 0)
-                    print(f"  SELL {idx_naive.strftime('%Y-%m-%d')} @ ${signal['price']:.2f} ({pnl:+.1f}%)")
-        
-        if buy_markers.notna().any():
-            addplots.append(mpf.make_addplot(
-                buy_markers, scatter=True, marker='^', color='#2196F3',
-                markersize=150, panel=0
-            ))
-        
-        if sell_markers.notna().any():
-            addplots.append(mpf.make_addplot(
-                sell_markers, scatter=True, marker='v', color='#FF5252',
-                markersize=150, panel=0
-            ))
-        
-        return addplots
-
-    def _add_legend(self, fig, ax, df, trade_signals=None):
-        """Add legend to upper left corner"""
-        legend_handles = []
-        
-        ma_info = [
-            ('MA20', self.COLORS['ma20'], '-'),
-            ('MA50', self.COLORS['ma50'], '-'),
-            ('EMA13', self.COLORS['ema13'], '--'),
-            ('EMA120', self.COLORS['ema120'], '--'),
-        ]
-        for name, color, style in ma_info:
-            if name in df.columns:
-                legend_handles.append(mlines.Line2D(
-                    [], [], color=color, linestyle=style, linewidth=1.5, label=name
-                ))
-        
-        if trade_signals:
-            if any(s['type'] == 'BUY' for s in trade_signals):
-                legend_handles.append(mlines.Line2D(
-                    [], [], color='#2196F3', marker='^', linestyle='None',
-                    markersize=10, label='BUY Entry'
-                ))
-            if any(s['type'] == 'SELL' for s in trade_signals):
-                legend_handles.append(mlines.Line2D(
-                    [], [], color='#FF5252', marker='v', linestyle='None',
-                    markersize=10, label='SELL Exit'
-                ))
-        
-        legend_handles.append(mlines.Line2D([], [], color=self.COLORS['bullish'], linewidth=2, label='Bullish'))
-        legend_handles.append(mlines.Line2D([], [], color=self.COLORS['bearish'], linewidth=2, label='Bearish'))
-        
-        if legend_handles:
-            ax.legend(handles=legend_handles, loc='upper left', fontsize=9,
-                      framealpha=0.9, edgecolor='#CCCCCC', ncol=2)
-
     def _plot_daily(self, df, symbol, save_path, trade_signals=None):
-        """Plot daily candlestick chart"""
+        """Plot daily candlestick chart with plotly"""
+        df = self.ma.calculate(df)
+        df = self.ma.get_crossovers(df)
         df = self._prepare_data(df)
         df = df.dropna(subset=['Open', 'Close', 'High', 'Low'])
         
@@ -231,48 +62,165 @@ class MarketSmithChart:
         if len(df) > self.show_days:
             df = df.tail(self.show_days)
 
-        addplots = self._get_addplots(df)
-        
+        # Create subplots: price, volume, RS, MACD
+        fig = make_subplots(
+            rows=4, cols=1,
+            shared_xaxes=True,
+            vertical_spacing=0.03,
+            row_heights=[0.5, 0.15, 0.175, 0.175],
+            subplot_titles=(f'{symbol} - Daily Chart', 'Volume', 'RS Score', 'MACD')
+        )
+
+        # --- Candlestick ---
+        fig.add_trace(go.Candlestick(
+            x=df.index,
+            open=df['Open'],
+            high=df['High'],
+            low=df['Low'],
+            close=df['Close'],
+            increasing_line_color=self.COLORS['bullish'],
+            decreasing_line_color=self.COLORS['bearish'],
+            increasing_fillcolor=self.COLORS['bullish'],
+            decreasing_fillcolor=self.COLORS['bearish'],
+            name='Price'
+        ), row=1, col=1)
+
+        # --- Moving Averages ---
+        for col, color, dash, name in [
+            ('MA20', self.COLORS['ma20'], 'solid', 'MA20'),
+            ('MA50', self.COLORS['ma50'], 'solid', 'MA50'),
+            ('EMA13', self.COLORS['ema13'], 'dash', 'EMA13'),
+            ('EMA120', self.COLORS['ema120'], 'dash', 'EMA120'),
+        ]:
+            if col in df.columns:
+                fig.add_trace(go.Scatter(
+                    x=df.index, y=df[col],
+                    mode='lines', name=name,
+                    line=dict(color=color, width=1.5, dash=dash),
+                    showlegend=True
+                ), row=1, col=1)
+
+        # --- Trade Signals ---
+        # BUY: price moved DOWN 2% (0.98), arrow points up below candle
+        # SELL: price moved UP 2% (1.02), arrow points down above candle
         if trade_signals:
-            addplots = self._add_trade_signals(df, trade_signals, addplots)
+            buy_dates, buy_prices = [], []
+            sell_dates, sell_prices = [], []
+            
+            df_tz = df.index.tz
+            df_index_naive = df.index.tz_localize(None) if df_tz is not None else df.index
+            
+            for signal in trade_signals:
+                sig_date = pd.Timestamp(signal['date'])
+                if sig_date.tz is not None:
+                    sig_date = sig_date.tz_localize(None)
+                
+                matching = df_index_naive[df_index_naive >= sig_date]
+                if len(matching) > 0:
+                    idx_naive = matching[0]
+                    idx = idx_naive.tz_localize(df_tz) if df_tz is not None else idx_naive
+                    
+                    if signal['type'] == 'BUY':
+                        # Move price DOWN 2% so arrow points up below candle
+                        buy_dates.append(idx)
+                        buy_prices.append(df.loc[idx, 'Low'] * 0.98)
+                        print(f"  BUY  {idx_naive.strftime('%Y-%m-%d')} @ ${signal['price']:.2f}")
+                    elif signal['type'] == 'SELL':
+                        # Move price UP 2% so arrow points down above candle
+                        sell_dates.append(idx)
+                        sell_prices.append(df.loc[idx, 'High'] * 1.02)
+                        pnl = signal.get('pnl_pct', 0)
+                        print(f"  SELL {idx_naive.strftime('%Y-%m-%d')} @ ${signal['price']:.2f} ({pnl:+.1f}%)")
+            
+            # Buy markers (triangle up, below candle)
+            if buy_dates:
+                fig.add_trace(go.Scatter(
+                    x=buy_dates, y=buy_prices,
+                    mode='markers', name='BUY Entry',
+                    marker=dict(symbol='triangle-up', size=12, color=self.COLORS['buy'],
+                                line=dict(width=1, color='darkblue')),
+                    showlegend=True
+                ), row=1, col=1)
+            
+            # Sell markers (triangle down, above candle)
+            if sell_dates:
+                fig.add_trace(go.Scatter(
+                    x=sell_dates, y=sell_prices,
+                    mode='markers', name='SELL Exit',
+                    marker=dict(symbol='triangle-down', size=12, color=self.COLORS['sell'],
+                                line=dict(width=1, color='darkred')),
+                    showlegend=True
+                ), row=1, col=1)
 
-        panel_ratios = (5, 1, 1.5, 1.5)
+        # --- Volume ---
+        vol_colors = [self.COLORS['volume_up'] if c >= o else self.COLORS['volume_down']
+                      for c, o in zip(df['Close'], df['Open'])]
+        fig.add_trace(go.Bar(
+            x=df.index, y=df['Volume'],
+            marker_color=vol_colors,
+            name='Volume',
+            showlegend=False
+        ), row=2, col=1)
 
-        mc = mpf.make_marketcolors(
-            up=self.COLORS['bullish'],
-            down=self.COLORS['bearish'],
-            edge={'up': self.COLORS['bullish'], 'down': self.COLORS['bearish']},
-            wick={'up': self.COLORS['bullish'], 'down': self.COLORS['bearish']},
-            volume={'up': self.COLORS['volume_up'], 'down': self.COLORS['volume_down']},
+        # --- RS Score ---
+        if 'RS_Score' in df.columns:
+            fig.add_trace(go.Scatter(
+                x=df.index, y=df['RS_Score'],
+                mode='lines', name='RS Score',
+                line=dict(color=self.COLORS['rs_line'], width=1.5),
+                showlegend=False
+            ), row=3, col=1)
+            fig.add_hline(y=70, line_dash="dot", line_color="#FF6600", row=3, col=1)
+
+        # --- MACD ---
+        close = df['Close']
+        ema12 = close.ewm(span=12, adjust=False).mean()
+        ema26 = close.ewm(span=26, adjust=False).mean()
+        macd_line = ema12 - ema26
+        signal_line = macd_line.ewm(span=9, adjust=False).mean()
+        macd_hist = macd_line - signal_line
+
+        fig.add_trace(go.Scatter(
+            x=df.index, y=macd_line,
+            mode='lines', name='MACD',
+            line=dict(color='#2196F3', width=1.2),
+            showlegend=False
+        ), row=4, col=1)
+        fig.add_trace(go.Scatter(
+            x=df.index, y=signal_line,
+            mode='lines', name='Signal',
+            line=dict(color='#FF9800', width=1.2),
+            showlegend=False
+        ), row=4, col=1)
+        hist_colors = [self.COLORS['bullish'] if v >= 0 else self.COLORS['bearish'] for v in macd_hist]
+        fig.add_trace(go.Bar(
+            x=df.index, y=macd_hist,
+            marker_color=hist_colors,
+            name='MACD Hist',
+            showlegend=False
+        ), row=4, col=1)
+
+        # Layout
+        fig.update_layout(
+            template='plotly_white',
+            height=900,
+            xaxis_rangeslider_visible=False,
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+            margin=dict(l=50, r=50, t=80, b=50),
         )
 
-        style = mpf.make_mpf_style(
-            marketcolors=mc,
-            gridstyle='-',
-            gridcolor='#E5E5E5',
-            y_on_right=True,
-            rc={'figure.facecolor': '#FFFFFF', 'axes.facecolor': '#FFFFFF', 'font.size': 11}
-        )
-
-        fig, axes = mpf.plot(
-            df,
-            type='candle',
-            style=style,
-            volume=True,
-            addplot=addplots,
-            figsize=self.figsize,
-            panel_ratios=panel_ratios,
-            title=f'\n{symbol} - Daily Chart',
-            returnfig=True,
-            tight_layout=True,
-            scale_padding={'left': 0.5, 'right': 1.2, 'top': 0.8, 'bottom': 0.5},
-        )
-        
-        self._add_legend(fig, axes[0], df, trade_signals)
+        # Remove range sliders
+        for i in range(1, 5):
+            fig.update_xaxes(rangeslider_visible=False, row=i, col=1)
 
         if save_path:
-            fig.savefig(save_path, bbox_inches='tight', dpi=150)
-            print(f"  Daily chart saved: {save_path}")
+            html_path = save_path.replace('.png', '.html')
+            fig.write_html(html_path)
+            try:
+                fig.write_image(save_path, width=1600, height=900, scale=2)
+                print(f"  Daily chart saved: {save_path}")
+            except Exception as e:
+                print(f"  Daily chart HTML saved: {html_path} (PNG: {e})")
 
         return fig
 
@@ -281,7 +229,6 @@ class MarketSmithChart:
         df = self._prepare_data(df)
         df = df.dropna(subset=['Open', 'Close', 'High', 'Low'])
         
-        # Ensure DatetimeIndex
         if not isinstance(df.index, pd.DatetimeIndex):
             df.index = pd.to_datetime(df.index)
         
@@ -294,24 +241,56 @@ class MarketSmithChart:
             'Volume': 'sum'
         }).dropna()
         
-        # Calculate weekly MAs (10wk ≈ 50day, 40wk ≈ 200day)
+        # Weekly MAs (10wk ≈ 50day, 40wk ≈ 200day)
         weekly_df['MA10'] = weekly_df['Close'].rolling(window=10).mean()
         weekly_df['MA40'] = weekly_df['Close'].rolling(window=40).mean()
-        
-        # Build addplots for weekly
-        addplots = []
-        if 'MA10' in weekly_df.columns:
-            addplots.append(mpf.make_addplot(
-                weekly_df['MA10'], color=self.COLORS['ma50'], linestyle='-', width=1.5,
-                panel=0, ylabel='Price'
-            ))
-        if 'MA40' in weekly_df.columns:
-            addplots.append(mpf.make_addplot(
-                weekly_df['MA40'], color=self.COLORS['bearish'], linestyle='-', width=1.5,
-                panel=0
-            ))
 
-        # Weekly MACD
+        # Create subplots
+        fig = make_subplots(
+            rows=3, cols=1,
+            shared_xaxes=True,
+            vertical_spacing=0.05,
+            row_heights=[0.6, 0.2, 0.2],
+            subplot_titles=(f'{symbol} - Weekly Chart (2-Year Trend)', 'Volume', 'MACD')
+        )
+
+        # Candlestick
+        fig.add_trace(go.Candlestick(
+            x=weekly_df.index,
+            open=weekly_df['Open'],
+            high=weekly_df['High'],
+            low=weekly_df['Low'],
+            close=weekly_df['Close'],
+            increasing_line_color=self.COLORS['bullish'],
+            decreasing_line_color=self.COLORS['bearish'],
+            increasing_fillcolor=self.COLORS['bullish'],
+            decreasing_fillcolor=self.COLORS['bearish'],
+            name='Price'
+        ), row=1, col=1)
+
+        # MAs
+        fig.add_trace(go.Scatter(
+            x=weekly_df.index, y=weekly_df['MA10'],
+            mode='lines', name='10W MA (~50D)',
+            line=dict(color=self.COLORS['ma50'], width=2),
+        ), row=1, col=1)
+        fig.add_trace(go.Scatter(
+            x=weekly_df.index, y=weekly_df['MA40'],
+            mode='lines', name='40W MA (~200D)',
+            line=dict(color=self.COLORS['bearish'], width=2),
+        ), row=1, col=1)
+
+        # Volume
+        vol_colors = [self.COLORS['volume_up'] if c >= o else self.COLORS['volume_down']
+                      for c, o in zip(weekly_df['Close'], weekly_df['Open'])]
+        fig.add_trace(go.Bar(
+            x=weekly_df.index, y=weekly_df['Volume'],
+            marker_color=vol_colors,
+            name='Volume',
+            showlegend=False
+        ), row=2, col=1)
+
+        # MACD
         close = weekly_df['Close']
         ema12 = close.ewm(span=12, adjust=False).mean()
         ema26 = close.ewm(span=26, adjust=False).mean()
@@ -319,80 +298,68 @@ class MarketSmithChart:
         signal_line = macd_line.ewm(span=9, adjust=False).mean()
         macd_hist = macd_line - signal_line
 
-        addplots.append(mpf.make_addplot(macd_line, color='#2196F3', width=1.2, panel=2, ylabel='MACD'))
-        addplots.append(mpf.make_addplot(signal_line, color='#FF9800', width=1.2, panel=2))
+        fig.add_trace(go.Scatter(
+            x=weekly_df.index, y=macd_line,
+            mode='lines', name='MACD',
+            line=dict(color='#2196F3', width=1.2),
+            showlegend=False
+        ), row=3, col=1)
+        fig.add_trace(go.Scatter(
+            x=weekly_df.index, y=signal_line,
+            mode='lines', name='Signal',
+            line=dict(color='#FF9800', width=1.2),
+            showlegend=False
+        ), row=3, col=1)
         hist_colors = [self.COLORS['bullish'] if v >= 0 else self.COLORS['bearish'] for v in macd_hist]
-        addplots.append(mpf.make_addplot(macd_hist, type='bar', color=hist_colors, panel=2, alpha=0.5))
+        fig.add_trace(go.Bar(
+            x=weekly_df.index, y=macd_hist,
+            marker_color=hist_colors,
+            name='MACD Hist',
+            showlegend=False
+        ), row=3, col=1)
 
-        mc = mpf.make_marketcolors(
-            up=self.COLORS['bullish'],
-            down=self.COLORS['bearish'],
-            edge={'up': self.COLORS['bullish'], 'down': self.COLORS['bearish']},
-            wick={'up': self.COLORS['bullish'], 'down': self.COLORS['bearish']},
-            volume={'up': self.COLORS['volume_up'], 'down': self.COLORS['volume_down']},
+        # Layout
+        fig.update_layout(
+            template='plotly_white',
+            height=800,
+            xaxis_rangeslider_visible=False,
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+            margin=dict(l=50, r=50, t=80, b=50),
         )
 
-        style = mpf.make_mpf_style(
-            marketcolors=mc,
-            gridstyle='-',
-            gridcolor='#E5E5E5',
-            y_on_right=True,
-            rc={'figure.facecolor': '#FFFFFF', 'axes.facecolor': '#FFFFFF', 'font.size': 12}
-        )
-
-        fig, axes = mpf.plot(
-            weekly_df,
-            type='candle',
-            style=style,
-            volume=True,
-            addplot=addplots,
-            figsize=(24, 12),
-            panel_ratios=(5, 1, 1.5),
-            title=f'\n{symbol} - Weekly Chart (2-Year Trend)',
-            returnfig=True,
-            tight_layout=True,
-        )
-        
-        # Add legend
-        legend_handles = [
-            mlines.Line2D([], [], color=self.COLORS['ma50'], linewidth=1.5, label='10W MA (~50D)'),
-            mlines.Line2D([], [], color=self.COLORS['bearish'], linewidth=1.5, label='40W MA (~200D)'),
-            mlines.Line2D([], [], color=self.COLORS['bullish'], linewidth=2, label='Bullish'),
-            mlines.Line2D([], [], color=self.COLORS['bearish'], linewidth=2, label='Bearish'),
-        ]
-        axes[0].legend(handles=legend_handles, loc='upper left', fontsize=9,
-                       framealpha=0.9, edgecolor='#CCCCCC', ncol=2)
+        for i in range(1, 4):
+            fig.update_xaxes(rangeslider_visible=False, row=i, col=1)
 
         if save_path:
-            fig.savefig(save_path, bbox_inches='tight', dpi=300)
-            print(f"  Weekly chart saved: {save_path}")
+            html_path = save_path.replace('.png', '.html')
+            fig.write_html(html_path)
+            try:
+                fig.write_image(save_path, width=1800, height=800, scale=2)
+                print(f"  Weekly chart saved: {save_path}")
+            except Exception as e:
+                print(f"  Weekly chart HTML saved: {html_path} (PNG: {e})")
 
         return fig
 
     def plot(self, df, symbol, save_path=None, trade_signals=None):
         """
         Plot chart(s):
-        - Always: Daily chart (last 180 days or show_days)
-        - If > 1 year data: Also generate weekly chart (full 2 years)
+        - Always: Daily chart
+        - If > 1 year data: Also generate weekly chart
         """
-        # Calculate indicators
-        df = self.ma.calculate(df)
-        df = self.ma.get_crossovers(df)
-        
         days_count = len(df)
         figs = []
         
-        # --- Daily Chart ---
+        # Daily Chart
         daily_save = save_path
         if save_path and days_count > 252:
-            # Rename daily path
             daily_save = save_path.replace('.png', '_daily.png')
         
         print(f"\n  Generating daily chart ({min(days_count, self.show_days)} days)...")
         fig_daily = self._plot_daily(df.copy(), symbol, daily_save, trade_signals)
         figs.append(fig_daily)
         
-        # --- Weekly Chart (if > 1 year) ---
+        # Weekly Chart (if > 1 year)
         if days_count > 252:
             weekly_save = save_path.replace('.png', '_weekly.png') if save_path else None
             print(f"  Generating weekly chart ({days_count} days -> weekly)...")
@@ -401,10 +368,6 @@ class MarketSmithChart:
         
         return figs if len(figs) > 1 else figs[0]
 
-
-# ==========================================
-# STANDALONE QUICK PLOT FUNCTION
-# ==========================================
 
 def quick_plot(df, symbol, save_path=None):
     """Quick plot function"""

@@ -1,0 +1,42 @@
+{
+  "NVDA": {
+    "sector": "Technology",
+    "industry": "Semiconductors"
+  },
+  "AAPL": {
+    "sector": "Technology",
+    "industry": "Consumer Electronics"
+  },
+  "MSFT": {
+    "sector": "Technology",
+    "industry": "Software - Infrastructure"
+  },
+  "JPM": {
+    "sector": "Financial Services",
+    "industry": "Banks - Diversified"
+  },
+  "AMD": {
+    "sector": "Technology",
+    "industry": "Semiconductors"
+  },
+  "AVGO": {
+    "sector": "Technology",
+    "industry": "Semiconductors"
+  },
+  "TSLA": {
+    "sector": "Consumer Cyclical",
+    "industry": "Auto Manufacturers"
+  },
+  "CRM": {
+    "sector": "Technology",
+    "industry": "Software - Application"
+  },
+  "META": {
+    "sector": "Communication Services",
+    "industry": "Internet Content & Information"
+  },
+  "GOOG": {
+    "sector": "Communication Services",
+    "industry": "Internet Content & Information"
+  }
+}

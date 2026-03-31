@@ -17,6 +17,7 @@ import argparse
 import os
 import sys
 import yaml
+import pandas as pd
 from datetime import datetime
 
 SCREEN_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -105,6 +106,92 @@ def load_config(config_file=None):
     return config
 
 
+# ── Sector Enrichment Helpers ──────────────────────────────────────────
+
+def _get_passing_tickers(result):
+    """Extract passing tickers from a screener result DataFrame."""
+    if result is None or result.empty or "ticker" not in result.columns:
+        return []
+    if "signal" in result.columns:
+        passing = result[result["signal"] == True]
+    elif "pass" in result.columns:
+        passing = result[result["pass"] == True]
+    elif "momentum_score" in result.columns:
+        passing = result[result["momentum_score"] >= 60]
+    elif "signal_strength" in result.columns:
+        passing = result[result["signal_strength"] >= 60]
+    elif "score" in result.columns:
+        passing = result[result["score"] >= 6]
+    else:
+        passing = result
+    return sorted(passing["ticker"].tolist())
+
+
+def _enrich_with_sectors(tickers):
+    """
+    Add sector column to a list of tickers using PortfolioManager's cache.
+
+    Returns:
+        pd.DataFrame with columns: ticker, sector
+    """
+    if not tickers:
+        return pd.DataFrame(columns=["ticker", "sector"])
+
+    try:
+        from positioning.portfolio_manager import PortfolioManager
+        pm = PortfolioManager()
+    except ImportError:
+        # Fallback: no sector data available
+        return pd.DataFrame({"ticker": tickers, "sector": ["Unknown"] * len(tickers)})
+
+    rows = []
+    for t in tickers:
+        meta = pm._get_stock_metadata(t)
+        rows.append({"ticker": t, "sector": meta.get("sector") or "Unknown"})
+
+    return pd.DataFrame(rows)
+
+
+def _print_sector_summary(sector_df):
+    """Print a sector distribution table from a ticker-sector DataFrame."""
+    if sector_df.empty:
+        print("\n  [SECTOR SUMMARY] No passing tickers.")
+        return
+
+    total = len(sector_df)
+    counts = sector_df["sector"].value_counts()
+
+    print(f"\n  [SECTOR SUMMARY]  {total} passing ticker(s)")
+    print(f"  {'Sector':<30} {'Count':>6} {'Weight':>8}")
+    print(f"  {'-'*30} {'-'*6} {'-'*8}")
+    for sector, count in counts.items():
+        pct = count / total * 100
+        print(f"  {sector:<30} {count:>6} {pct:>7.1f}%")
+
+
+def _save_screened_results(filepath_txt, filepath_csv, tickers, sector_df):
+    """
+    Save screener results to .txt (tickers only) and .csv (ticker + sector).
+
+    Args:
+        filepath_txt: Path for plain ticker list
+        filepath_csv: Path for ticker+sector CSV
+        tickers: List of ticker strings
+        sector_df: DataFrame with 'ticker' and 'sector' columns
+    """
+    # Plain text — one ticker per line (backward compatible)
+    with open(filepath_txt, "w") as f:
+        for t in tickers:
+            f.write(f"{t}\n")
+
+    # CSV with sector column
+    if not sector_df.empty:
+        sector_df.to_csv(filepath_csv, index=False)
+        print(f"  Saved: {filepath_csv}")
+
+    print(f"  Saved: {filepath_txt}")
+
+
 def run_stage2(config):
     """Run Stage 2 screener."""
     print("\n" + "="*70)
@@ -127,43 +214,22 @@ def run_stage2(config):
     if config.get("save_results", True):
         timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
         os.makedirs("screen_result", exist_ok=True)
-        filepath = f"screen_result/screener_stage2_{timestamp}.txt"
         
-        if result is not None and not result.empty:
-            if "pass" in result.columns:
-                passing = result[result["pass"] == True]
-            elif "signal" in result.columns:
-                passing = result[result["signal"] == True]
-            else:
-                passing = result
-            tickers = sorted(passing["ticker"].tolist()) if "ticker" in passing.columns else []
-        else:
-            tickers = []
+        tickers = _get_passing_tickers(result)
+        sector_df = _enrich_with_sectors(tickers)
+        _print_sector_summary(sector_df)
         
-        with open(filepath, "w") as f:
-            for t in tickers:
-                f.write(f"{t}\n")
-        print(f"\n  Saved: {filepath}")
+        filepath_txt = f"screen_result/screener_stage2_{timestamp}.txt"
+        filepath_csv = f"screen_result/screener_stage2_{timestamp}.csv"
+        _save_screened_results(filepath_txt, filepath_csv, tickers, sector_df)
         
         # --- Correlation Check ---
-        if config.get("enable_correlation_check", True):
-            all_screened = []
-            if result is not None and not result.empty and "ticker" in result.columns:
-                if "score" in result.columns:
-                    all_screened = result[result["score"] >= 6]["ticker"].tolist()
-                elif "signal_strength" in result.columns:
-                    all_screened = result[result["signal_strength"] >= 60]["ticker"].tolist()
-                elif "momentum_score" in result.columns:
-                    all_screened = result[result["momentum_score"] >= 60]["ticker"].tolist()
-                else:
-                    all_screened = result["ticker"].tolist()
-            
-            if len(all_screened) >= 2:
-                try:
-                    from correlation import check_correlation_warnings
-                    check_correlation_warnings(all_screened, threshold=0.7, days=40)
-                except ImportError:
-                    print("  Correlation module not found.")
+        if config.get("enable_correlation_check", True) and len(tickers) >= 2:
+            try:
+                from correlation import check_correlation_warnings
+                check_correlation_warnings(tickers, threshold=0.7, days=40)
+            except ImportError:
+                print("  Correlation module not found.")
     
     return result
 
@@ -194,43 +260,22 @@ def run_momentum(config):
     if config.get("save_results", True):
         timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
         os.makedirs("screen_result", exist_ok=True)
-        filepath = f"screen_result/screener_momentum_{timestamp}.txt"
         
-        if result is not None and not result.empty:
-            if "signal" in result.columns:
-                passing = result[result["signal"] == True]
-            elif "pass" in result.columns:
-                passing = result[result["pass"] == True]
-            else:
-                passing = result
-            tickers = sorted(passing["ticker"].tolist()) if "ticker" in passing.columns else []
-        else:
-            tickers = []
+        tickers = _get_passing_tickers(result)
+        sector_df = _enrich_with_sectors(tickers)
+        _print_sector_summary(sector_df)
         
-        with open(filepath, "w") as f:
-            for t in tickers:
-                f.write(f"{t}\n")
-        print(f"\n  Saved: {filepath}")
+        filepath_txt = f"screen_result/screener_momentum_{timestamp}.txt"
+        filepath_csv = f"screen_result/screener_momentum_{timestamp}.csv"
+        _save_screened_results(filepath_txt, filepath_csv, tickers, sector_df)
         
         # --- Correlation Check ---
-        if config.get("enable_correlation_check", True):
-            all_screened = []
-            if result is not None and not result.empty and "ticker" in result.columns:
-                if "momentum_score" in result.columns:
-                    all_screened = result[result["momentum_score"] >= 60]["ticker"].tolist()
-                elif "score" in result.columns:
-                    all_screened = result[result["score"] >= 6]["ticker"].tolist()
-                elif "signal_strength" in result.columns:
-                    all_screened = result[result["signal_strength"] >= 60]["ticker"].tolist()
-                else:
-                    all_screened = result["ticker"].tolist()
-            
-            if len(all_screened) >= 2:
-                try:
-                    from correlation import check_correlation_warnings
-                    check_correlation_warnings(all_screened, threshold=0.7, days=40)
-                except ImportError:
-                    print("  Correlation module not found.")
+        if config.get("enable_correlation_check", True) and len(tickers) >= 2:
+            try:
+                from correlation import check_correlation_warnings
+                check_correlation_warnings(tickers, threshold=0.7, days=40)
+            except ImportError:
+                print("  Correlation module not found.")
     
     return result
 
@@ -241,7 +286,6 @@ def run_week10_momentum(config):
     print("  RUNNING WEEK 10% MOMENTUM SCREENER")
     print("="*70)
     
-    import week10_momentum
     from week10_momentum import run_screener as run_wk10_screener
     
     wk10_params = config["week10_momentum"].copy()
@@ -263,23 +307,14 @@ def run_week10_momentum(config):
     if config.get("save_results", True):
         timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
         os.makedirs("screen_result", exist_ok=True)
-        filepath = f"screen_result/screener_week10_momentum_{timestamp}.txt"
         
-        if result is not None and not result.empty:
-            if "signal" in result.columns:
-                passing = result[result["signal"] == True]
-            elif "pass" in result.columns:
-                passing = result[result["pass"] == True]
-            else:
-                passing = result
-            tickers = sorted(passing["ticker"].tolist()) if "ticker" in passing.columns else []
-        else:
-            tickers = []
+        tickers = _get_passing_tickers(result)
+        sector_df = _enrich_with_sectors(tickers)
+        _print_sector_summary(sector_df)
         
-        with open(filepath, "w") as f:
-            for t in tickers:
-                f.write(f"{t}\n")
-        print(f"\n  Saved: {filepath}")
+        filepath_txt = f"screen_result/screener_week10_momentum_{timestamp}.txt"
+        filepath_csv = f"screen_result/screener_week10_momentum_{timestamp}.csv"
+        _save_screened_results(filepath_txt, filepath_csv, tickers, sector_df)
     
     return result
 
@@ -299,17 +334,14 @@ def run_oversold(config):
     if config.get("save_results", True):
         timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
         os.makedirs("screen_result", exist_ok=True)
-        filepath = f"screen_result/screener_oversold_{timestamp}.txt"
         
-        if result is not None and not result.empty:
-            tickers = sorted(result["ticker"].tolist()) if "ticker" in result.columns else []
-        else:
-            tickers = []
+        tickers = _get_passing_tickers(result)
+        sector_df = _enrich_with_sectors(tickers)
+        _print_sector_summary(sector_df)
         
-        with open(filepath, "w") as f:
-            for t in tickers:
-                f.write(f"{t}\n")
-        print(f"\n  Saved: {filepath}")
+        filepath_txt = f"screen_result/screener_oversold_{timestamp}.txt"
+        filepath_csv = f"screen_result/screener_oversold_{timestamp}.csv"
+        _save_screened_results(filepath_txt, filepath_csv, tickers, sector_df)
     
     return result
 

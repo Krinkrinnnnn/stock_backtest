@@ -4,8 +4,24 @@ VCP + RS Strategy Backtester using backtrader
 Uses backtrader library for reliable, event-driven backtesting.
 """
 
+import os
+
 import matplotlib
 matplotlib.use('Agg')  # Must be set before importing any matplotlib-dependent libraries
+import matplotlib.font_manager as fm
+# Fallback font for systems/Docker containers without Arial
+try:
+    for font_path in [
+        '/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf',
+        'C:/Windows/Fonts/arial.ttf',
+        '/System/Library/Fonts/Arial.ttf',
+    ]:
+        if os.path.exists(font_path):
+            fm.fontManager.addfont(font_path)
+            break
+except Exception:
+    pass
+matplotlib.rcParams['font.family'] = 'Liberation Sans'
 
 import backtrader as bt
 import yfinance as yf

@@ -14,6 +14,22 @@ Usage:
 import sys
 import os
 
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.font_manager as fm
+try:
+    for font_path in [
+        '/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf',
+        'C:/Windows/Fonts/arial.ttf',
+        '/System/Library/Fonts/Arial.ttf',
+    ]:
+        if os.path.exists(font_path):
+            fm.fontManager.addfont(font_path)
+            break
+except Exception:
+    pass
+matplotlib.rcParams['font.family'] = 'Liberation Sans'
+
 import yfinance as yf
 import pandas as pd
 import numpy as np
@@ -227,63 +243,109 @@ def run_backtest(tickers, period="5y", cash=10000, commission=0.002, plot=True):
             
             stats = bt.run()
             
-            # Print stats - handle both cases (with/without trades)
-            print(f"\n  Backtest Results for {ticker}:")
-            print(f"  ----------------------------------------")
+            # Extract stats
+            start_dt = stats.get('Start', 'N/A')
+            end_dt = stats.get('End', 'N/A')
+            dur = stats.get('Duration', 'N/A')
+            total_return = stats.get('Return [%]', 0)
+            sharpe = stats.get('Sharpe Ratio', 0)
+            sortino = stats.get('Sortino Ratio', 0)
+            max_dd = stats.get('Max. Drawdown [%]', 0)
+            total_trades = stats.get('# Trades', 0)
+            win_rate = stats.get('Win Rate [%]', 0)
+            avg_trade = stats.get('Avg. Trade [%]', 0)
+            best_trade = stats.get('Best Trade [%]', 0)
+            worst_trade = stats.get('Worst Trade [%]', 0)
             
-            # Check if backtest generated results
-            if stats is None or (hasattr(stats, 'empty') and stats.empty) or stats.get('# Trades', 0) == 0:
-                print(f"  Start Date:         {stats.get('Start', 'N/A')}")
-                print(f"  End Date:           {stats.get('End', 'N/A')}")
-                print(f"  Duration:           {stats.get('Duration', 'N/A')}")
-                print(f"  ----------------------------------------")
-                print(f"  0 Trades Executed")
-                print(f"  ----------------------------------------")
-                print(f"  Explanation: No trades were generated during this period.")
-                print(f"  This strategy requires the stock to be above its 200-day moving average (SMA200).")
-                print(f"  With a {period} backtest, the first 200 days are spent calculating the SMA200,")
-                print(f"  leaving very little time for actual trading. In a downtrend (e.g. INTC),")
-                print(f"  the price remains below the 200 SMA, yielding 0 valid entry signals.")
-                print(f"  Try adjusting parameters or using a longer period (e.g., --years 3).")
+            # Final equity
+            final_equity = cash * (1 + total_return / 100)
+            
+            # Win / Loss counts
+            trades_df = stats.get('_trades')
+            won = int(trades_df[trades_df['ReturnPct'] > 0].shape[0]) if trades_df is not None and not trades_df.empty else 0
+            lost = int(trades_df[trades_df['ReturnPct'] <= 0].shape[0]) if trades_df is not None and not trades_df.empty else 0
+            
+            avg_win_pct = trades_df[trades_df['ReturnPct'] > 0]['ReturnPct'].mean() * 100 if won > 0 else 0
+            avg_loss_pct = trades_df[trades_df['ReturnPct'] <= 0]['ReturnPct'].mean() * 100 if lost > 0 else 0
+            profit_factor = abs(
+                trades_df[trades_df['ReturnPct'] > 0]['PnL'].sum() /
+                trades_df[trades_df['ReturnPct'] <= 0]['PnL'].sum()
+            ) if lost > 0 and trades_df[trades_df['ReturnPct'] <= 0]['PnL'].sum() != 0 else float('inf')
+            
+            # Save summary to file
+            from datetime import datetime as dt
+            timestamp = dt.now().strftime("%Y%m%d_%H%M%S")
+            child_dir = os.path.join(OUTPUT_DIR, f"{ticker}_{timestamp}")
+            os.makedirs(child_dir, exist_ok=True)
+            
+            summary_text = []
+            summary_text.append("\n" + "=" * 70)
+            summary_text.append(f"  OVERSOLD SPRING TRAP STRATEGY BACKTEST RESULTS - {ticker}")
+            summary_text.append("=" * 70)
+            
+            if total_trades == 0:
+                summary_text.append("\n  [ PERFORMANCE SUMMARY ]")
+                summary_text.append(f"  {'Start Date:':<30} {start_dt}")
+                summary_text.append(f"  {'End Date:':<30} {end_dt}")
+                summary_text.append(f"  {'Duration:':<30} {dur}")
+                summary_text.append(f"\n  [ NO TRADES EXECUTED ]")
+                summary_text.append("  This strategy requires the stock to be above its 200-day moving average (SMA200).")
+                summary_text.append(f"  With a {period} backtest, the first 200 days are spent calculating the SMA200,")
+                summary_text.append("  leaving very little time for actual trading. In a downtrend (e.g. INTC),")
+                summary_text.append("  the price remains below the 200 SMA, yielding 0 valid entry signals.")
+                summary_text.append("  Try adjusting parameters or using a longer period (e.g., --years 3).")
             else:
-                # Access stats using .get() to avoid key issues
-                start_dt = stats.get('Start', 'N/A') 
-                end_dt = stats.get('End', 'N/A')
-                dur = stats.get('Duration', 'N/A')
+                summary_text.append("\n  [ PERFORMANCE SUMMARY ]")
+                summary_text.append(f"  {'Initial Capital:':<30} ${cash:>12,.2f}")
+                summary_text.append(f"  {'Final Equity:':<30} ${final_equity:>12,.2f}")
+                summary_text.append(f"  {'Total Return:':<30} {total_return:>11.2f}%")
+                summary_text.append(f"  {'Start Date:':<30} {start_dt}")
+                summary_text.append(f"  {'End Date:':<30} {end_dt}")
+                summary_text.append(f"  {'Duration:':<30} {dur}")
+                summary_text.append(f"  {'Sharpe Ratio:':<30} {sharpe:>12.3f}")
+                summary_text.append(f"  {'Sortino Ratio:':<30} {sortino:>12.3f}")
+                summary_text.append(f"  {'Max Drawdown:':<30} {max_dd:>11.2f}%")
                 
-                print(f"  Start Date:         {start_dt}")
-                print(f"  End Date:           {end_dt}")
-                print(f"  Duration:           {dur}")
-                print(f"  ----------------------------------------")
-                print(f"  Return (Total):     {stats.get('Return [%]', 0):.2f}%")
-                print(f"  Sharpe Ratio:       {stats.get('Sharpe Ratio', 0):.2f}")
-                print(f"  Sortino Ratio:     {stats.get('Sortino Ratio', 0):.2f}")
-                print(f"  Max Drawdown:       {stats.get('Max. Drawdown [%]', 0):.2f}%")
-                print(f"  ----------------------------------------")
-                print(f"  # Trades:           {stats.get('# Trades', 0)}")
-                print(f"  Win Rate:           {stats.get('Win Rate [%]', 0):.1f}%")
-                print(f"  Avg Trade:          {stats.get('Avg. Trade [%]', 0):.2f}%")
-                print(f"  Best Trade:         {stats.get('Best Trade [%]', 0):.2f}%")
-                print(f"  Worst Trade:       {stats.get('Worst Trade [%]', 0):.2f}%")
-                print(f"  ----------------------------------------")
+                summary_text.append("\n  [ TRADE STATISTICS ]")
+                summary_text.append(f"  {'Total Trades:':<30} {total_trades:>12d}")
+                summary_text.append(f"  {'Won:':<30} {won:>12d}")
+                summary_text.append(f"  {'Lost:':<30} {lost:>12d}")
+                summary_text.append(f"  {'Win Rate:':<30} {win_rate:>11.1f}%")
+                summary_text.append(f"  {'Avg Win (%):':<30} {avg_win_pct:>11.2f}%")
+                summary_text.append(f"  {'Avg Loss (%):':<30} {avg_loss_pct:>11.2f}%")
+                summary_text.append(f"  {'Profit Factor:':<30} {profit_factor:>12.2f}")
+                summary_text.append(f"  {'Best Trade:':<30} {best_trade:>11.2f}%")
+                summary_text.append(f"  {'Worst Trade:':<30} {worst_trade:>11.2f}%")
                 
-                # Print trade log if any trades
-                trades = stats.get('_trades')
-                if trades is not None and not trades.empty:
-                    print(f"\n  Trade Log:")
-                    print(f"  {'Entry Date':<12} {'Exit Date':<12} {'Entry Price':>12} {'Exit Price':>12} {'Return %':>10}")
-                    print(f"  {'-'*12} {'-'*12} {'-'*12} {'-'*12} {'-'*10}")
-                    for _, trade in trades.iterrows():
+                avg_duration = stats.get('Avg. Trade Duration', 'N/A')
+                summary_text.append(f"  {'Avg Holding (bars):':<30} {avg_duration}")
+                
+                if trades_df is not None and not trades_df.empty:
+                    summary_text.append("\n  [ TRADE LOG ]")
+                    summary_text.append(f"  {'Entry Date':<12} {'Exit Date':<12} {'Entry Price':>12} {'Exit Price':>12} {'Return %':>10}")
+                    summary_text.append(f"  {'-'*12} {'-'*12} {'-'*12} {'-'*12} {'-'*10}")
+                    for _, trade in trades_df.iterrows():
                         entry_dt = pd.to_datetime(trade['EntryTime']).strftime('%Y-%m-%d')
                         exit_dt = pd.to_datetime(trade['ExitTime']).strftime('%Y-%m-%d')
                         ret = trade['ReturnPct'] * 100
-                        print(f"  {entry_dt:<12} {exit_dt:<12} {trade['EntryPrice']:>12.2f} {trade['ExitPrice']:>12.2f} {ret:>+10.2f}%")
-                
-                # Save chart
-                if plot:
-                    chart_path = os.path.join(OUTPUT_DIR, f"{ticker}_oversold_backtest.html")
-                    bt.plot(filename=chart_path, open_browser=False)
-                    print(f"\n  Chart saved to: {chart_path}")
+                        summary_text.append(f"  {entry_dt:<12} {exit_dt:<12} {trade['EntryPrice']:>12.2f} {trade['ExitPrice']:>12.2f} {ret:>+10.2f}%")
+            
+            summary_text.append("\n" + "=" * 70)
+            
+            # Print to console and save to file
+            full_summary = "\n".join(summary_text)
+            print(full_summary)
+            
+            summary_file = os.path.join(child_dir, f"{ticker}_summary.txt")
+            with open(summary_file, "w", encoding="utf-8") as f:
+                f.write(full_summary)
+            print(f"[SUCCESS] Summary saved to: {summary_file}")
+            
+            # Save chart
+            if plot:
+                chart_path = os.path.join(child_dir, f"{ticker}_oversold_backtest.html")
+                bt.plot(filename=chart_path, open_browser=False)
+                print(f"[SUCCESS] Chart saved to: {chart_path}")
             
         except Exception as e:
             print(f"  Backtest failed for {ticker}: {e}")

@@ -1,10 +1,10 @@
 {
-  "Date": "2026-03-30",
-  "Timestamp": "2026-03-30 12:24:47",
-  "Final_Regime": "HARD_MONEY_PROTECT",
-  "Confidence": 0.0,
-  "Position_Pct": 0,
-  "Recommended_Action": "Cash Only \u2014 Preserve Capital, Wait for Confirmation",
+  "Date": "2026-03-31",
+  "Timestamp": "2026-03-31 10:15:51",
+  "Final_Regime": "ACCUMULATION_PHASE",
+  "Confidence": 0.3,
+  "Position_Pct": 30,
+  "Recommended_Action": "Mean Reversion / Bottom Fishing \u2014 Small Pilot Positions Only",
   "Market_Health": {
     "Score": 0,
     "Max_Score": 4,
@@ -16,30 +16,30 @@
       "VIX": 0
     },
     "Metrics": {
-      "Breadth_50MA_Pct": 22.34,
-      "Breadth_200MA_Pct": 46.28,
-      "Net_New_Highs": -23,
+      "Breadth_50MA_Pct": 21.31,
+      "Breadth_200MA_Pct": 45.5,
+      "Net_New_Highs": -4,
       "Smart_Money_Ratio_Trend": "Bearish (Risk-Off)",
-      "VIX_Level": 31.05
+      "VIX_Level": 30.61
     }
   },
   "Risk_Appetite": {
-    "Score": 0,
+    "Score": 2,
     "Max_Score": 4,
-    "Signal": "Risk-Off",
+    "Signal": "Risk-On",
     "Indicator_Scores": {
       "Growth_vs_Defensive": 0,
       "Credit_Appetite": 0,
-      "High_Yield_Spread": 0,
-      "Yield_Curve": 0
+      "High_Yield_Spread": 1,
+      "Yield_Curve": 1
     },
     "Metrics": {
       "QQQ_XLP_Trend": "Defensive Leading",
       "HYG_IEF_Trend": "Risk-Off (Credit)",
-      "HY_OAS_Spread": "N/A (FRED error)",
-      "Yield_Curve_Trend": "N/A (no data)"
+      "HY_OAS_Spread": "Low Stress (3.42%)",
+      "Yield_Curve_Trend": "Normal (+0.560%)"
     }
   },
-  "Regime": "HARD_MONEY_PROTECT",
+  "Regime": "ACCUMULATION_PHASE",
   "Total_Score": 0
 }

@@ -8,8 +8,11 @@ End-to-end stock analysis pipeline: Market Regime → Screener → Backtest → 
 # Build Docker image
 docker compose build
 
-# Run full pipeline (regime-based auto mode)
+# Run full pipeline (regime → report → Discord notification)
 docker compose run --rm harbor-engine python run_pipeline.py
+
+# Run market health + auto-send to Discord
+docker compose run --rm harbor-engine python market_health/market_regime.py
 
 # Backtest a specific stock
 docker compose run --rm harbor-engine python run_backtest.py --strategy vcp --symbol AAPL --years 3 --capital 100000
@@ -228,7 +231,7 @@ Calculates 4 structural indicators:
 3. **Smart Money:** HYG/IEF ratio vs 50-day SMA
 4. **VIX:** Volatility vs 20-day SMA
 
-`run_market_health(skip_chart=False)` — Runs full scoring pipeline.
+`run_market_health(skip_chart=False)` — Runs full scoring pipeline, outputs enhanced summary with score bars, prev-day deltas, divergence warnings, and regime transition. Auto-sends to Discord.
 
 `load_regime_state(max_hours=4)` — Quick load cached regime state.
 
@@ -240,7 +243,12 @@ Calculates 4 sentiment indicators:
 3. **High Yield Spread:** ICE BofA HY OAS via FRED
 4. **Yield Curve:** 10Y-2Y Treasury spread via FRED
 
-`calculate_risk_appetite_pro()` — Returns dict with `score`, `signal`, `details`.
+`calculate_risk_appetite_pro()` — Returns dict with `score`, `signal`, `details`, `prev_*` deltas.
+
+Helper functions:
+- `fred_fetch_last_n(series_id, n)` — Fetch last N FRED observations as `[(value, date), ...]`
+- `score_bar(score, max=4)` — Visual bar like `██░░`
+- `format_delta(current, prev, prev_date, is_pct, invert)` — Format delta string like `(prev: 3.42 on 2026-03-27 ↓)`
 
 #### `decision_engine.py` — Unified Decision Matrix
 
@@ -254,6 +262,50 @@ Combines Market Health + Risk Appetite via 2x2 matrix:
 | Off | Off | HARD_MONEY_PROTECT | Full defense | 0% |
 
 `compute_decision(market_health_score, risk_appetite_signal)` — Returns dict with `Final_Regime`, `Confidence`, `Action`, `Position_Pct`.
+
+`print_decision(decision, mh_result, ra_result, prev_state_path)` — Enhanced output with:
+- Score bars (`█░░░`) for both MH and RA
+- Market Health breakdown with prev-day deltas
+- Divergence warning when MH and RA conflict
+- Regime transition (improving ↑ / deteriorating ↓) with score deltas
+
+#### Output Format
+
+```
+──────────────────────────────────────────────────
+  🧬 RISK APPETITE PRO (Institutional Sentiment)
+  ──────────────────────────────────────────────────
+  Score: ██░░ 2/4  |  Signal: Risk-On
+  ──────────────────────────────────────────────────
+  📊 [1/4] QQQ/XLP Growth vs Defensive...
+    Ratio: 7.0405 | SMA50: 7.1216  →  ❌ 0 (prev: 6.8183 on 2026-03-30 ↑)
+  📊 [3/4] High Yield OAS Spread...
+    OAS: 3.46% (FRED)  →  ✅ +1 (prev: 3.42% on 2026-03-27 ↓)
+
+  ──────────────────────────────────────────────────
+  🏥 MARKET HEALTH (Structural)
+  ──────────────────────────────────────────────────
+  Score: █░░░ 1/4  |  Regime: Weak (Caution)
+  ──────────────────────────────────────────────────
+  Breadth (50MA/200MA):  22.99% / 47.16%  →  ❌ 0 (prev: 21.34% / 45.6% on 2026-03-30 ↑)
+  VIX Level:             25.25  →  ❌ 0 (prev: 30.61 on 2026-03-30 ↓)
+
+============================================================
+  🟠 UNIFIED DECISION ENGINE
+============================================================
+  Market Health:    █░░░ 1/4  (❌ Fail)
+  Risk Appetite:    ██░░ 2/4  (✅ Risk-On)
+────────────────────────────────────────────────────────────
+  ⚠️  DIVERGENCE: Structure weak (1/4) but sentiment risk-on (2/4)
+      → Accumulation phase — early recovery signals forming
+────────────────────────────────────────────────────────────
+  Final Regime:     🟠 ACCUMULATION_PHASE
+  📈 Regime Change: 🔴 HARD_MONEY_PROTECT → 🟠 ACCUMULATION_PHASE
+      → Improving ↑ — conditions getting better
+      → Market Health: 1/4 → 1/4 (—0)
+      → Risk Appetite: 1/4 → 2/4 (↑1)
+============================================================
+```
 
 ---
 
@@ -282,11 +334,15 @@ Returns int (shares to buy).
 
 ### 8. Notifier — `notifier.py`
 
-Sends market regime report to Discord via webhook.
+Sends market regime report to Discord via webhook. Auto-called by `market_regime.py` at the end of each run.
 
 Requires `DISCORD_WEBHOOK_URL` in `.env`.
 
-`main()` — Reads regime JSON, builds dual-panel embed (Panel A: Market Health, Panel B: Risk Appetite), attaches chart, sends to Discord.
+`main()` — Reads regime JSON, builds enhanced embed with:
+- Score bars (`█░░░`) in Panel A/B headers
+- Prev-day deltas for each indicator (e.g. `(prev: 3.42 on 2026-03-27 ↓)`)
+- Divergence warning field when Market Health and Risk Appetite conflict
+- Chart attachment
 
 ---
 

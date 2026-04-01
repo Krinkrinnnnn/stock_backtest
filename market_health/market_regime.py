@@ -285,10 +285,24 @@ def calculate_breadth_score(data, chart_days=250):
     # Score: +1 if both > 50%
     score = 1 if (breadth_50 > 50 and breadth_200 > 50) else 0
 
+    # Previous day values
+    prev_breadth_50 = None
+    prev_breadth_200 = None
+    prev_breadth_date = None
+    if len(breadth_df) >= 2:
+        prev_row = breadth_df.iloc[-2]
+        prev_breadth_50 = round(float(prev_row['Breadth_50MA_Smooth']), 2)
+        prev_breadth_200 = round(float(prev_row['Breadth_200MA_Smooth']), 2)
+        prev_idx = breadth_df.index[-2]
+        prev_breadth_date = prev_idx.strftime("%Y-%m-%d") if hasattr(prev_idx, 'strftime') else str(prev_idx)
+
     return {
         "score": score,
         "breadth_50": breadth_50,
         "breadth_200": breadth_200,
+        "prev_breadth_50": prev_breadth_50,
+        "prev_breadth_200": prev_breadth_200,
+        "prev_breadth_date": prev_breadth_date,
         "breadth_df": breadth_df.tail(chart_days)
     }
 
@@ -340,10 +354,20 @@ def calculate_net_highs_score(data):
     # Score: +1 if Net_Highs > 0 AND Net_Highs > EMA
     score = 1 if (net_highs_val > 0 and net_highs_val > net_highs_ema_val) else 0
 
+    # Previous day values
+    prev_net_highs = None
+    prev_net_date = None
+    if len(net_df) >= 2:
+        prev_net_highs = int(net_df.iloc[-2]['Net_Highs'])
+        prev_idx = net_df.index[-2]
+        prev_net_date = prev_idx.strftime("%Y-%m-%d") if hasattr(prev_idx, 'strftime') else str(prev_idx)
+
     return {
         "score": score,
         "net_highs": net_highs_val,
         "net_highs_ema": net_highs_ema_val,
+        "prev_net_highs": prev_net_highs,
+        "prev_net_date": prev_net_date,
         "net_df": net_df
     }
 
@@ -383,11 +407,21 @@ def calculate_smart_money_score(macro_data):
     score = 1 if ratio_val > ratio_sma_val else 0
     trend = "Bullish (Risk-On)" if score == 1 else "Bearish (Risk-Off)"
 
+    # Previous day values
+    prev_ratio = None
+    prev_smart_date = None
+    if len(smart_df) >= 2:
+        prev_ratio = round(float(smart_df.iloc[-2]['HYG_IEF_Ratio']), 4)
+        prev_idx = smart_df.index[-2]
+        prev_smart_date = prev_idx.strftime("%Y-%m-%d") if hasattr(prev_idx, 'strftime') else str(prev_idx)
+
     return {
         "score": score,
         "ratio": ratio_val,
         "ratio_sma": ratio_sma_val,
         "trend": trend,
+        "prev_ratio": prev_ratio,
+        "prev_smart_date": prev_smart_date,
         "smart_df": smart_df
     }
 
@@ -424,10 +458,20 @@ def calculate_vix_score(macro_data):
     # Score: +1 if VIX < SMA AND VIX < 20
     score = 1 if (vix_val < vix_sma_val and vix_val < 20.0) else 0
 
+    # Previous day values
+    prev_vix = None
+    prev_vix_date = None
+    if len(vix_df) >= 2:
+        prev_vix = round(float(vix_df.iloc[-2]['VIX']), 2)
+        prev_idx = vix_df.index[-2]
+        prev_vix_date = prev_idx.strftime("%Y-%m-%d") if hasattr(prev_idx, 'strftime') else str(prev_idx)
+
     return {
         "score": score,
         "vix": vix_val,
         "vix_sma": vix_sma_val,
+        "prev_vix": prev_vix,
+        "prev_vix_date": prev_vix_date,
         "vix_df": vix_df
     }
 
@@ -485,6 +529,18 @@ def export_market_regime(mh_result, ra_result, decision):
             "Regime": mh_result["Regime"],
             "Indicator_Scores": mh_result["Indicator_Scores"],
             "Metrics": mh_result["Metrics"],
+            # Previous day deltas
+            "Prev_Deltas": {
+                "Breadth_50": mh_result.get("prev_breadth_50"),
+                "Breadth_200": mh_result.get("prev_breadth_200"),
+                "Breadth_Date": mh_result.get("prev_breadth_date"),
+                "Net_Highs": mh_result.get("prev_net_highs"),
+                "Net_Date": mh_result.get("prev_net_date"),
+                "Smart_Money_Ratio": mh_result.get("prev_ratio"),
+                "Smart_Date": mh_result.get("prev_smart_date"),
+                "VIX": mh_result.get("prev_vix"),
+                "VIX_Date": mh_result.get("prev_vix_date"),
+            },
         },
 
         # ── Panel B: Risk Appetite (Sentiment) ──
@@ -494,6 +550,12 @@ def export_market_regime(mh_result, ra_result, decision):
             "Signal": ra_result["signal"],
             "Indicator_Scores": ra_result["indicator_scores"],
             "Metrics": ra_result["metrics"],
+            # Previous day deltas
+            "Prev_Deltas": {
+                "QQQ_XLP_Ratio": ra_result.get("details", {}).get("qqq_xlp_prev_ratio"),
+                "HYG_IEF_Ratio": ra_result.get("details", {}).get("hyg_ief_prev_ratio"),
+            },
+            "Details": ra_result.get("details", {}),
         },
 
         # ── Backwards compat (run_pipeline.py reads these) ──
@@ -674,7 +736,18 @@ def run_market_health(skip_chart=False):
             "Net_Highs": net_result["score"],
             "Smart_Money": smart_result["score"],
             "VIX": vix_result["score"],
-        }
+        },
+        # Previous day values for delta comparison
+        "prev_breadth_50": breadth_result.get("prev_breadth_50"),
+        "prev_breadth_200": breadth_result.get("prev_breadth_200"),
+        "prev_breadth_date": breadth_result.get("prev_breadth_date"),
+        "prev_net_highs": net_result.get("prev_net_highs"),
+        "prev_net_date": net_result.get("prev_net_date"),
+        "prev_ratio": smart_result.get("prev_ratio"),
+        "prev_smart_date": smart_result.get("prev_smart_date"),
+        "ratio": smart_result.get("ratio"),
+        "prev_vix": vix_result.get("prev_vix"),
+        "prev_vix_date": vix_result.get("prev_vix_date"),
     }
 
     # 4. 計算 Risk Appetite Pro
@@ -683,7 +756,10 @@ def run_market_health(skip_chart=False):
 
     # 5. Unified Decision Engine
     decision = compute_decision(mh_score, ra_result["signal"])
-    print_decision(decision)
+
+    # Previous state path for regime transition comparison
+    state_path = os.path.join(RESULT_DIR, "market_regime.json")
+    print_decision(decision, mh_result=mh_result, ra_result=ra_result, prev_state_path=state_path)
 
     # 6. 匯出 JSON
     print(f"\n  [6/7] Exporting to JSON...")
@@ -701,16 +777,6 @@ def run_market_health(skip_chart=False):
     else:
         print(f"\n  [7/7] Chart skipped")
 
-    # 8. 市場健康摘要
-    print(f"\n{'='*60}")
-    print(f"  🏥 MARKET HEALTH: {mh_score} / 4")
-    print(f"{'='*60}")
-    print(f"  Breadth (50MA/200MA):  {breadth_result['breadth_50']}% / {breadth_result['breadth_200']}%  →  {'✅ +1' if breadth_result['score'] else '❌ 0'}")
-    print(f"  Net New Highs:         {net_result['net_highs']} (EMA: {net_result['net_highs_ema']})  →  {'✅ +1' if net_result['score'] else '❌ 0'}")
-    print(f"  Smart Money (HYG/IEF): {smart_result['trend']}  →  {'✅ +1' if smart_result['score'] else '❌ 0'}")
-    print(f"  VIX Level:             {vix_result['vix']} (SMA: {vix_result['vix_sma']})  →  {'✅ +1' if vix_result['score'] else '❌ 0'}")
-    print(f"{'='*60}")
-
     return {"market_health": mh_result, "risk_appetite": ra_result, "decision": decision}
 
 
@@ -726,3 +792,16 @@ if __name__ == "__main__":
         print("  🔄 Force refresh: bypassing all caches")
 
     run_market_health(skip_chart=args.skip_chart)
+
+    # Auto-send to Discord
+    print(f"\n  [8/8] Sending Discord notification...")
+    import subprocess
+    notifier_path = os.path.join(SCRIPT_DIR, "..", "notifier.py")
+    try:
+        subprocess.run(
+            ["python", notifier_path],
+            check=False,
+            timeout=60,
+        )
+    except Exception as e:
+        print(f"  ⚠️ Notifier failed: {e}")

@@ -30,6 +30,40 @@ FRED_API_KEY = os.getenv("FRED_API_KEY", "").strip()
 
 
 # ==========================================
+# SCORE BAR HELPER
+# ==========================================
+
+def score_bar(score: int, max_score: int = 4) -> str:
+    """Generate a visual score bar like '██░░'."""
+    return "█" * score + "░" * (max_score - score)
+
+
+def format_delta(current, previous, prev_date=None, is_pct=False, invert=False) -> str:
+    """Format a delta string comparing current to previous value.
+    
+    Args:
+        invert: If True, lower values are better (e.g., VIX, OAS spread)
+        prev_date: Date string of previous observation (e.g., "2026-03-28")
+    """
+    if previous is None or current is None:
+        return ""
+    try:
+        diff = float(current) - float(previous)
+        if abs(diff) < 0.005:
+            date_str = f" on {prev_date}" if prev_date else ""
+            return f" (prev: {previous}{date_str} —)"
+        arrow = "↑" if diff > 0 else "↓"
+        if invert:
+            arrow = "↓" if diff > 0 else "↑"
+        date_str = f" on {prev_date}" if prev_date else ""
+        if is_pct:
+            return f" (prev: {previous}%{date_str} {arrow})"
+        return f" (prev: {previous}{date_str} {arrow})"
+    except (TypeError, ValueError):
+        return ""
+
+
+# ==========================================
 # DATA FRESHNESS HELPER
 # ==========================================
 
@@ -54,45 +88,8 @@ def check_yf_freshness(df_or_series, label: str) -> None:
 # FRED HELPER (direct API)
 # ==========================================
 
-def fred_latest(series_id: str) -> float | None:
-    """Fetch the latest value of a FRED series via direct HTTP."""
-    if not FRED_API_KEY:
-        return None
-    try:
-        url = (
-            f"https://api.stlouisfed.org/fred/series/observations"
-            f"?series_id={series_id}"
-            f"&api_key={FRED_API_KEY}"
-            f"&file_type=json"
-            f"&sort_order=desc"
-            f"&limit=1"
-        )
-        resp = requests.get(url, timeout=15)
-        resp.raise_for_status()
-        data = resp.json()
-        obs = data.get("observations", [])
-        if obs and obs[0].get("value", ".") != ".":
-            val = float(obs[0]["value"])
-            obs_date = obs[0].get("date", "?")
-            from datetime import datetime as dt
-            try:
-                age = (dt.now() - dt.strptime(obs_date, "%Y-%m-%d")).days
-                if age <= 2:
-                    print(f"    📅 FRED {series_id}: ✅ {obs_date} (fresh)")
-                elif age <= 7:
-                    print(f"    📅 FRED {series_id}: ⚠️ {obs_date} ({age}d old)")
-                else:
-                    print(f"    📅 FRED {series_id}: ❌ {obs_date} ({age}d old — STALE)")
-            except Exception:
-                pass
-            return val
-    except Exception as e:
-        print(f"    ⚠️ FRED API error ({series_id}): {e}")
-    return None
-
-
-def fred_series_last_n(series_id: str, n: int = 10) -> list[float]:
-    """Fetch the last N values of a FRED series."""
+def fred_fetch_last_n(series_id: str, n: int = 2) -> list[tuple[float, str]]:
+    """Fetch the last N observations of a FRED series. Returns [(value, date), ...]."""
     if not FRED_API_KEY:
         return []
     try:
@@ -108,10 +105,34 @@ def fred_series_last_n(series_id: str, n: int = 10) -> list[float]:
         resp.raise_for_status()
         data = resp.json()
         obs = data.get("observations", [])
-        return [float(o["value"]) for o in obs if o.get("value", ".") != "."]
+        results = []
+        for o in obs:
+            if o.get("value", ".") != ".":
+                results.append((float(o["value"]), o.get("date", "?")))
+        return results
     except Exception as e:
         print(f"    ⚠️ FRED API error ({series_id}): {e}")
     return []
+
+
+def fred_latest(series_id: str) -> float | None:
+    """Fetch the latest value of a FRED series via direct HTTP."""
+    results = fred_fetch_last_n(series_id, 1)
+    if results:
+        val, obs_date = results[0]
+        from datetime import datetime as dt
+        try:
+            age = (dt.now() - dt.strptime(obs_date, "%Y-%m-%d")).days
+            if age <= 2:
+                print(f"    📅 FRED {series_id}: ✅ {obs_date} (fresh)")
+            elif age <= 7:
+                print(f"    📅 FRED {series_id}: ⚠️ {obs_date} ({age}d old)")
+            else:
+                print(f"    📅 FRED {series_id}: ❌ {obs_date} ({age}d old — STALE)")
+        except Exception:
+            pass
+        return val
+    return None
 
 
 # ==========================================
@@ -141,12 +162,22 @@ def score_growth_vs_defensive() -> dict:
 
         score = 1 if ratio_val > sma_val else 0
         trend = "Growth Leading" if score else "Defensive Leading"
-        print(f"    Ratio: {ratio_val} | SMA50: {sma_val}  →  {'✅ +1' if score else '❌ 0'}")
-        return {"score": score, "ratio": ratio_val, "sma": sma_val, "trend": trend, "df": df}
+
+        # Previous day value
+        prev_ratio = None
+        prev_date = None
+        if len(df) >= 2:
+            prev_ratio = round(float(df.iloc[-2]["QQQ_XLP"]), 4)
+            prev_idx = df.index[-2]
+            prev_date = prev_idx.strftime("%Y-%m-%d") if hasattr(prev_idx, 'strftime') else str(prev_idx)
+
+        delta = format_delta(ratio_val, prev_ratio, prev_date=prev_date)
+        print(f"    Ratio: {ratio_val} | SMA50: {sma_val}  →  {'✅ +1' if score else '❌ 0'}{delta}")
+        return {"score": score, "ratio": ratio_val, "sma": sma_val, "trend": trend, "df": df, "prev_ratio": prev_ratio}
 
     except Exception as e:
         print(f"    ⚠️ Failed: {e}")
-        return {"score": 0, "ratio": None, "sma": None, "trend": "N/A", "df": pd.DataFrame()}
+        return {"score": 0, "ratio": None, "sma": None, "trend": "N/A", "df": pd.DataFrame(), "prev_ratio": None}
 
 
 # ==========================================
@@ -176,12 +207,22 @@ def score_credit_appetite() -> dict:
 
         score = 1 if ratio_val > sma_val else 0
         trend = "Risk-On (Credit)" if score else "Risk-Off (Credit)"
-        print(f"    Ratio: {ratio_val} | SMA50: {sma_val}  →  {'✅ +1' if score else '❌ 0'}")
-        return {"score": score, "ratio": ratio_val, "sma": sma_val, "trend": trend, "df": df}
+
+        # Previous day value
+        prev_ratio = None
+        prev_date = None
+        if len(df) >= 2:
+            prev_ratio = round(float(df.iloc[-2]["HYG_IEF"]), 4)
+            prev_idx = df.index[-2]
+            prev_date = prev_idx.strftime("%Y-%m-%d") if hasattr(prev_idx, 'strftime') else str(prev_idx)
+
+        delta = format_delta(ratio_val, prev_ratio, prev_date=prev_date)
+        print(f"    Ratio: {ratio_val} | SMA50: {sma_val}  →  {'✅ +1' if score else '❌ 0'}{delta}")
+        return {"score": score, "ratio": ratio_val, "sma": sma_val, "trend": trend, "df": df, "prev_ratio": prev_ratio}
 
     except Exception as e:
         print(f"    ⚠️ Failed: {e}")
-        return {"score": 0, "ratio": None, "sma": None, "trend": "N/A", "df": pd.DataFrame()}
+        return {"score": 0, "ratio": None, "sma": None, "trend": "N/A", "df": pd.DataFrame(), "prev_ratio": None}
 
 
 # ==========================================
@@ -196,13 +237,33 @@ def score_high_yield_spread() -> dict:
     """
     print("  📊 [3/4] High Yield OAS Spread...")
 
-    # Method 1: Direct FRED API
-    spread = fred_latest("BAMLH0A0HYM2")
-    if spread is not None:
+    # Method 1: Direct FRED API — single limit=2 call for current + prev
+    fred_obs = fred_fetch_last_n("BAMLH0A0HYM2", 2)
+    if fred_obs:
+        spread, obs_date = fred_obs[0]
         score = 1 if spread < 4.0 else 0
         trend = f"Low Stress ({spread:.2f}%)" if score else f"High Stress ({spread:.2f}%)"
-        print(f"    OAS: {spread:.2f}% (FRED)  →  {'✅ +1' if score else '❌ 0'}")
-        return {"score": score, "spread": round(spread, 2), "trend": trend, "source": "FRED"}
+        # Previous day from same API call
+        prev_spread = None
+        prev_date = None
+        if len(fred_obs) >= 2:
+            prev_spread = round(fred_obs[1][0], 2)
+            prev_date = fred_obs[1][1]
+        # Freshness log
+        from datetime import datetime as dt
+        try:
+            age = (dt.now() - dt.strptime(obs_date, "%Y-%m-%d")).days
+            if age <= 2:
+                print(f"    📅 FRED BAMLH0A0HYM2: ✅ {obs_date} (fresh)")
+            elif age <= 7:
+                print(f"    📅 FRED BAMLH0A0HYM2: ⚠️ {obs_date} ({age}d old)")
+            else:
+                print(f"    📅 FRED BAMLH0A0HYM2: ❌ {obs_date} ({age}d old — STALE)")
+        except Exception:
+            pass
+        delta = format_delta(round(spread, 2), prev_spread, prev_date=prev_date, is_pct=True, invert=True)
+        print(f"    OAS: {spread:.2f}% (FRED)  →  {'✅ +1' if score else '❌ 0'}{delta}")
+        return {"score": score, "spread": round(spread, 2), "trend": trend, "source": "FRED", "prev_spread": prev_spread}
 
     # Method 2: HYG 20-day return proxy (rising = spreads tightening)
     print("    ⚠️ FRED unavailable, using HYG proxy...")
@@ -233,16 +294,38 @@ def score_yield_curve() -> dict:
     """
     print("  📊 [4/4] Yield Curve 10Y-2Y...")
 
-    # Method 1: Direct FRED API
-    y10 = fred_latest("DGS10")
-    y2 = fred_latest("DGS2")
+    # Method 1: Direct FRED API — single limit=2 call per series
+    y10_obs = fred_fetch_last_n("DGS10", 2)
+    y2_obs = fred_fetch_last_n("DGS2", 2)
 
-    if y10 is not None and y2 is not None:
+    if y10_obs and y2_obs:
+        y10, y10_date = y10_obs[0]
+        y2, y2_date = y2_obs[0]
         spread = round(y10 - y2, 3)
         score = 1 if spread > 0 else 0
         trend = f"Normal ({spread:+.3f}%)" if score else f"Inverted ({spread:+.3f}%)"
-        print(f"    10Y: {y10}% | 2Y: {y2}% | Spread: {spread:+.3f}% (FRED)  →  {'✅ +1' if score else '❌ 0'}")
-        return {"score": score, "spread": spread, "y10": y10, "y2": y2, "trend": trend, "source": "FRED"}
+        # Freshness log
+        from datetime import datetime as dt
+        for sid, sdate in [("DGS10", y10_date), ("DGS2", y2_date)]:
+            try:
+                age = (dt.now() - dt.strptime(sdate, "%Y-%m-%d")).days
+                if age <= 2:
+                    print(f"    📅 FRED {sid}: ✅ {sdate} (fresh)")
+                elif age <= 7:
+                    print(f"    📅 FRED {sid}: ⚠️ {sdate} ({age}d old)")
+                else:
+                    print(f"    📅 FRED {sid}: ❌ {sdate} ({age}d old — STALE)")
+            except Exception:
+                pass
+        # Previous day spread from same API calls
+        prev_spread = None
+        prev_date = None
+        if len(y10_obs) >= 2 and len(y2_obs) >= 2:
+            prev_spread = round(y10_obs[1][0] - y2_obs[1][0], 3)
+            prev_date = y10_obs[1][1]
+        delta = format_delta(spread, prev_spread, prev_date=prev_date, is_pct=True)
+        print(f"    10Y: {y10}% | 2Y: {y2}% | Spread: {spread:+.3f}% (FRED)  →  {'✅ +1' if score else '❌ 0'}{delta}")
+        return {"score": score, "spread": spread, "y10": y10, "y2": y2, "trend": trend, "source": "FRED", "prev_spread": prev_spread}
 
     # Method 2: TLT/SHY ratio proxy (inverse — TLT up = yields down)
     print("    ⚠️ FRED unavailable, using TLT/SHY proxy...")
@@ -294,8 +377,9 @@ def calculate_risk_appetite_pro() -> dict:
     total = g_vs_d["score"] + credit["score"] + hy_spread["score"] + yc["score"]
     signal = "Risk-On" if total >= 2 else "Risk-Off"
 
+    bar = score_bar(total)
     print(f"  {'─'*50}")
-    print(f"  🧬 RISK APPETITE SCORE: {total} / 4  →  {signal}")
+    print(f"  Score: {bar} {total}/4  |  Signal: {signal}")
     print(f"  {'─'*50}")
 
     return {
@@ -315,7 +399,9 @@ def calculate_risk_appetite_pro() -> dict:
         },
         "details": {
             "qqq_xlp_ratio": g_vs_d.get("ratio"),
+            "qqq_xlp_prev_ratio": g_vs_d.get("prev_ratio"),
             "hyg_ief_ratio": credit.get("ratio"),
+            "hyg_ief_prev_ratio": credit.get("prev_ratio"),
             "hy_spread_pct": hy_spread.get("spread"),
             "hy_source": hy_spread.get("source", "none"),
             "yield_spread_pct": yc.get("spread"),

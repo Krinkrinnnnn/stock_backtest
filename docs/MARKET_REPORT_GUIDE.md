@@ -71,7 +71,7 @@
 當系統進入 `HARD_MONEY_PROTECT` 或 `ACCUMULATION_PHASE` 時，執行：
 
 ```bash
-docker compose run --rm harbor-engine python oversold_screener.py
+python screen/screen_main.py --screener oversold
 ```
 
 選股條件：
@@ -87,13 +87,13 @@ docker compose run --rm harbor-engine python oversold_screener.py
 
 ```bash
 # 1. 生成報告 (結構 + 情緒 + 決策)
-docker compose run --rm harbor-engine python market_health/market_regime.py
+python market_health/market_regime.py
 
 # 2. 推送 Discord (Embed + 圖表)
-docker compose run --rm harbor-engine python notifier.py
+python notifier.py
 
 # 3. 若為 HARD_MONEY / ACCUMULATION，執行超賣選股
-docker compose run --rm harbor-engine python oversold_screener.py
+python screen/screen_main.py --screener oversold
 ```
 
 ---

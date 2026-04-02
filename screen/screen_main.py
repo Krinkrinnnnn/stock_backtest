@@ -141,7 +141,8 @@ def _get_passing_tickers(result):
 
 def _enrich_with_sectors(tickers):
     """
-    Add sector column to a list of tickers using PortfolioManager's cache.
+    Add sector column to a list of tickers.
+    Tries PortfolioManager cache first, falls back to direct yfinance lookup.
 
     Returns:
         pd.DataFrame with columns: ticker, sector
@@ -149,18 +150,32 @@ def _enrich_with_sectors(tickers):
     if not tickers:
         return pd.DataFrame(columns=["ticker", "sector"])
 
+    sector_map = {}
+
+    # Try PortfolioManager cache first
     try:
         from positioning.portfolio_manager import PortfolioManager
         pm = PortfolioManager()
-    except ImportError:
-        # Fallback: no sector data available
-        return pd.DataFrame({"ticker": tickers, "sector": ["Unknown"] * len(tickers)})
+        for t in tickers:
+            meta = pm._get_stock_metadata(t)
+            s = meta.get("sector")
+            if s:
+                sector_map[t] = s
+    except (ImportError, Exception):
+        pass
 
-    rows = []
+    # Fallback: direct yfinance for any missing sectors
+    import yfinance as yf
     for t in tickers:
-        meta = pm._get_stock_metadata(t)
-        rows.append({"ticker": t, "sector": meta.get("sector") or "Unknown"})
+        if t not in sector_map:
+            try:
+                info = yf.Ticker(t).info
+                if info and info.get("sector"):
+                    sector_map[t] = info["sector"]
+            except Exception:
+                pass
 
+    rows = [{"ticker": t, "sector": sector_map.get(t, "Unknown")} for t in tickers]
     return pd.DataFrame(rows)
 
 
@@ -181,30 +196,42 @@ def _print_sector_summary(sector_df):
         print(f"  {sector:<30} {count:>6} {pct:>7.1f}%")
 
 
-def _save_screened_results(filepath_txt, filepath_csv, tickers, sector_df):
+def _save_screened_results(filepath_txt, filepath_xlsx, tickers, sector_df, full_result=None):
     """
-    Save screener results to .txt (tickers only) and .csv (ticker + sector).
+    Save screener results to .txt (tickers only) and .xlsx (full data + sector).
 
     Args:
         filepath_txt: Path for plain ticker list
-        filepath_csv: Path for ticker+sector CSV
-        tickers: List of ticker strings
+        filepath_xlsx: Path for full data Excel file
+        tickers: List of passing ticker strings
         sector_df: DataFrame with 'ticker' and 'sector' columns
+        full_result: Full DataFrame from screener (all rows, all metrics)
     """
     # Plain text — one ticker per line (backward compatible)
     with open(filepath_txt, "w") as f:
         for t in tickers:
             f.write(f"{t}\n")
 
-    # CSV with sector column
-    if not sector_df.empty:
-        sector_df.to_csv(filepath_csv, index=False)
-        print(f"  Saved: {filepath_csv}")
+    # Excel with full screener data + sector
+    if full_result is not None and not full_result.empty:
+        export_df = full_result.copy()
+        # Merge sector into full result
+        if not sector_df.empty and "ticker" in export_df.columns:
+            export_df = export_df.merge(sector_df, on="ticker", how="left")
+            if "sector" in export_df.columns:
+                export_df["sector"] = export_df["sector"].fillna("Unknown")
+        # Clean column names for Excel
+        export_df.columns = [str(c).replace("_", " ").title() for c in export_df.columns]
+        export_df.to_excel(filepath_xlsx, index=False, sheet_name="Results")
+        print(f"  Saved: {filepath_xlsx}  ({len(export_df)} rows)")
+    elif not sector_df.empty:
+        sector_df.to_excel(filepath_xlsx, index=False, sheet_name="Results")
+        print(f"  Saved: {filepath_xlsx}")
 
     print(f"  Saved: {filepath_txt}")
 
 
-def run_stage2(config):
+def run_stage2(config, output_dir=None):
     """Run Stage 2 screener."""
     print("\n" + "="*70)
     print("  RUNNING STAGE 2 SCREENER")
@@ -224,16 +251,18 @@ def run_stage2(config):
     )
     
     if config.get("save_results", True):
-        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
-        os.makedirs(SCREEN_RESULT_DIR, exist_ok=True)
+        save_dir = output_dir or SCREEN_RESULT_DIR
+        os.makedirs(save_dir, exist_ok=True)
         
         tickers = _get_passing_tickers(result)
-        sector_df = _enrich_with_sectors(tickers)
-        _print_sector_summary(sector_df)
+        all_tickers = sorted(result["ticker"].tolist()) if isinstance(result, pd.DataFrame) and "ticker" in result.columns else tickers
+        sector_df = _enrich_with_sectors(all_tickers)
+        _print_sector_summary(sector_df[sector_df["ticker"].isin(tickers)]) if tickers else None
         
-        filepath_txt = f"{SCREEN_RESULT_DIR}/screener_stage2_{timestamp}.txt"
-        filepath_csv = f"{SCREEN_RESULT_DIR}/screener_stage2_{timestamp}.csv"
-        _save_screened_results(filepath_txt, filepath_csv, tickers, sector_df)
+        filepath_txt = f"{save_dir}/screener_stage2.txt"
+        filepath_xlsx = f"{save_dir}/screener_stage2.xlsx"
+        full_df = result if isinstance(result, pd.DataFrame) else None
+        _save_screened_results(filepath_txt, filepath_xlsx, tickers, sector_df, full_result=full_df)
         
         # --- Correlation Check ---
         if config.get("enable_correlation_check", True) and len(tickers) >= 2:
@@ -246,7 +275,7 @@ def run_stage2(config):
     return result
 
 
-def run_momentum(config):
+def run_momentum(config, output_dir=None):
     """Run Momentum screener."""
     print("\n" + "="*70)
     print("  RUNNING MOMENTUM SCREENER")
@@ -270,16 +299,18 @@ def run_momentum(config):
     )
     
     if config.get("save_results", True):
-        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
-        os.makedirs(SCREEN_RESULT_DIR, exist_ok=True)
+        save_dir = output_dir or SCREEN_RESULT_DIR
+        os.makedirs(save_dir, exist_ok=True)
         
         tickers = _get_passing_tickers(result)
-        sector_df = _enrich_with_sectors(tickers)
-        _print_sector_summary(sector_df)
+        all_tickers = sorted(result["ticker"].tolist()) if isinstance(result, pd.DataFrame) and "ticker" in result.columns else tickers
+        sector_df = _enrich_with_sectors(all_tickers)
+        _print_sector_summary(sector_df[sector_df["ticker"].isin(tickers)]) if tickers else None
         
-        filepath_txt = f"{SCREEN_RESULT_DIR}/screener_momentum_{timestamp}.txt"
-        filepath_csv = f"{SCREEN_RESULT_DIR}/screener_momentum_{timestamp}.csv"
-        _save_screened_results(filepath_txt, filepath_csv, tickers, sector_df)
+        filepath_txt = f"{save_dir}/screener_momentum.txt"
+        filepath_xlsx = f"{save_dir}/screener_momentum.xlsx"
+        full_df = result if isinstance(result, pd.DataFrame) else None
+        _save_screened_results(filepath_txt, filepath_xlsx, tickers, sector_df, full_result=full_df)
         
         # --- Correlation Check ---
         if config.get("enable_correlation_check", True) and len(tickers) >= 2:
@@ -292,7 +323,7 @@ def run_momentum(config):
     return result
 
 
-def run_week10_momentum(config):
+def run_week10_momentum(config, output_dir=None):
     """Run Week 10% Momentum screener."""
     print("\n" + "="*70)
     print("  RUNNING WEEK 10% MOMENTUM SCREENER")
@@ -317,21 +348,23 @@ def run_week10_momentum(config):
     )
     
     if config.get("save_results", True):
-        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
-        os.makedirs(SCREEN_RESULT_DIR, exist_ok=True)
+        save_dir = output_dir or SCREEN_RESULT_DIR
+        os.makedirs(save_dir, exist_ok=True)
         
         tickers = _get_passing_tickers(result)
-        sector_df = _enrich_with_sectors(tickers)
-        _print_sector_summary(sector_df)
+        all_tickers = sorted(result["ticker"].tolist()) if isinstance(result, pd.DataFrame) and "ticker" in result.columns else tickers
+        sector_df = _enrich_with_sectors(all_tickers)
+        _print_sector_summary(sector_df[sector_df["ticker"].isin(tickers)]) if tickers else None
         
-        filepath_txt = f"{SCREEN_RESULT_DIR}/screener_week10_momentum_{timestamp}.txt"
-        filepath_csv = f"{SCREEN_RESULT_DIR}/screener_week10_momentum_{timestamp}.csv"
-        _save_screened_results(filepath_txt, filepath_csv, tickers, sector_df)
+        filepath_txt = f"{save_dir}/screener_week10_momentum.txt"
+        filepath_xlsx = f"{save_dir}/screener_week10_momentum.xlsx"
+        full_df = result if isinstance(result, pd.DataFrame) else None
+        _save_screened_results(filepath_txt, filepath_xlsx, tickers, sector_df, full_result=full_df)
     
     return result
 
 
-def run_oversold(config):
+def run_oversold(config, output_dir=None):
     """Run Oversold Spring Trap screener."""
     print("\n" + "="*70)
     print("  RUNNING OVERSOLD SCREENER (Spring Trap)")
@@ -344,23 +377,30 @@ def run_oversold(config):
     )
     
     if config.get("save_results", True):
-        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
-        os.makedirs(SCREEN_RESULT_DIR, exist_ok=True)
+        save_dir = output_dir or SCREEN_RESULT_DIR
+        os.makedirs(save_dir, exist_ok=True)
         
         tickers = _get_passing_tickers(result)
-        sector_df = _enrich_with_sectors(tickers)
-        _print_sector_summary(sector_df)
+        all_tickers = sorted(result["ticker"].tolist()) if isinstance(result, pd.DataFrame) and "ticker" in result.columns else tickers
+        sector_df = _enrich_with_sectors(all_tickers)
+        _print_sector_summary(sector_df[sector_df["ticker"].isin(tickers)]) if tickers else None
         
-        filepath_txt = f"{SCREEN_RESULT_DIR}/screener_oversold_{timestamp}.txt"
-        filepath_csv = f"{SCREEN_RESULT_DIR}/screener_oversold_{timestamp}.csv"
-        _save_screened_results(filepath_txt, filepath_csv, tickers, sector_df)
+        filepath_txt = f"{save_dir}/screener_oversold.txt"
+        filepath_xlsx = f"{save_dir}/screener_oversold.xlsx"
+        full_df = result if isinstance(result, pd.DataFrame) else None
+        _save_screened_results(filepath_txt, filepath_xlsx, tickers, sector_df, full_result=full_df)
     
     return result
 
 
 def run_all_screeners(config):
-    """Run all screeners."""
+    """Run all screeners. All outputs saved to a single session folder."""
     results = {}
+    
+    # Create a shared output folder for this run
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
+    session_dir = os.path.join(SCREEN_RESULT_DIR, f"screen_all_{timestamp}")
+    os.makedirs(session_dir, exist_ok=True)
     
     print(f"\n{'#'*70}")
     print(f"#  STOCK SCREENER SUITE")
@@ -368,18 +408,19 @@ def run_all_screeners(config):
     print(f"#  Tickers Source: {config['tickers_file']}")
     print(f"#  Liquidity Filter: {'ON' if config['enable_liquidity_filter'] else 'OFF'}")
     print(f"#  New High RS: {'ON' if config['enable_new_high_rs'] else 'OFF'}")
+    print(f"#  Output Folder: {session_dir}")
     print(f"{'#'*70}")
     
     for screener_name in ["stage2", "momentum", "week10_momentum", "oversold"]:
         try:
             if screener_name == "stage2":
-                results["stage2"] = run_stage2(config)
+                results["stage2"] = run_stage2(config, output_dir=session_dir)
             elif screener_name == "momentum":
-                results["momentum"] = run_momentum(config)
+                results["momentum"] = run_momentum(config, output_dir=session_dir)
             elif screener_name == "week10_momentum":
-                results["week10_momentum"] = run_week10_momentum(config)
+                results["week10_momentum"] = run_week10_momentum(config, output_dir=session_dir)
             elif screener_name == "oversold":
-                results["oversold"] = run_oversold(config)
+                results["oversold"] = run_oversold(config, output_dir=session_dir)
         except Exception as e:
             print(f"Error running {screener_name} screener: {e}")
             results[screener_name] = None
@@ -387,6 +428,7 @@ def run_all_screeners(config):
     print(f"\n{'#'*70}")
     print(f"#  ALL SCREENERS COMPLETED")
     print(f"#  Finished: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"#  Output: {session_dir}")
     print(f"{'#'*70}")
     
     return results

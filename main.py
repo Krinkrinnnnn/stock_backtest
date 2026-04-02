@@ -1,5 +1,6 @@
 import argparse
 import os
+from datetime import datetime
 import pandas as pd
 import numpy as np
 from fetch_data import fetch_stock_data
@@ -12,7 +13,7 @@ from backtester import run_backtest, VCP_STRATEGY_PARAMS
 # ==========================================
 CONFIG = {
     # Data Settings
-    "symbol": "AAPL",            # Target stock symbol (e.g., AAPL, TSLA, NVDA)
+    "symbols": ["AAPL"],         # Target stock symbols (e.g., ["AAPL", "TSLA", "NVDA"])
     "years_of_data": 2,          # Number of years of historical data to fetch
     "benchmark": "^GSPC",        # Benchmark symbol for RS calculation (default: S&P 500)
     
@@ -34,11 +35,18 @@ CONFIG = {
 # ==========================================
 
 
-def run_analysis(config):
+def run_analysis(config, session_dir=None):
     """
     Main execution pipeline using the provided configuration.
     """
-    symbol = config["symbol"]
+    for symbol in config["symbols"]:
+        run_single_analysis(config, symbol, session_dir)
+
+
+def run_single_analysis(config, symbol, session_dir=None):
+    """
+    Analysis pipeline for a single stock symbol.
+    """
     years = config["years_of_data"]
     benchmark = config["benchmark"]
     
@@ -99,8 +107,11 @@ def run_analysis(config):
             if bt_result_dir:
                 # Save chart in back_test_result folder with summary.txt
                 save_path = os.path.join(bt_result_dir, f"{symbol}_chart.png")
+            elif session_dir:
+                # Save chart in session folder
+                save_path = os.path.join(session_dir, f"{symbol}_analysis.png")
             else:
-                # Save chart in output folder for non-backtest analysis
+                # Fallback: save chart in output folder
                 output_dir = "output"
                 os.makedirs(output_dir, exist_ok=True)
                 save_path = os.path.join(output_dir, f"{symbol}_analysis.png")
@@ -113,6 +124,7 @@ if __name__ == "__main__":
     # Optional CLI arguments to override config
     parser = argparse.ArgumentParser(description="Stock VCP & RS Analysis System")
     parser.add_argument("--symbol", type=str, help="Stock symbol to analyze")
+    parser.add_argument("--symbols", type=str, nargs="+", help="Multiple stock symbols to analyze")
     parser.add_argument("--years", type=int, help="Years of data to fetch")
     parser.add_argument("--no-plot", action="store_true", help="Disable chart plotting")
     parser.add_argument("--backtest", action="store_true", help="Run strategy backtest")
@@ -121,8 +133,10 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     # Apply CLI overrides if provided
-    if args.symbol:
-        CONFIG["symbol"] = args.symbol.upper()
+    if args.symbols:
+        CONFIG["symbols"] = [s.upper() for s in args.symbols]
+    elif args.symbol:
+        CONFIG["symbols"] = [args.symbol.upper()]
     if args.years:
         CONFIG["years_of_data"] = args.years
     if args.no_plot:
@@ -133,5 +147,15 @@ if __name__ == "__main__":
         CONFIG["years_of_data"] = max(CONFIG["years_of_data"], 3)
     if args.capital:
         CONFIG["initial_capital"] = args.capital
+    
+    # Create session folder with all tickers in the name
+    session_dir = None
+    if CONFIG["save_chart"] and not CONFIG["run_backtest"]:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        ticker_str = "_".join(CONFIG["symbols"])
+        session_name = f"session_{ticker_str}_{timestamp}"
+        session_dir = os.path.join("output", session_name)
+        os.makedirs(session_dir, exist_ok=True)
+        print(f"Session output folder: {session_dir}")
         
-    run_analysis(CONFIG)
+    run_analysis(CONFIG, session_dir=session_dir)

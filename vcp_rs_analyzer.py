@@ -1,5 +1,7 @@
 import pandas as pd
 import numpy as np
+from scipy.signal import find_peaks
+from scipy.interpolate import interp1d
 
 
 def calculate_rs_line(df, benchmark_df):
@@ -23,43 +25,90 @@ def calculate_rs_line(df, benchmark_df):
     return rs_line
 
 
+def detect_vcp_arcs(prices, dates, window=15):
+    """
+    Detect VCP contraction arcs using peak/trough detection and quadratic curve fitting.
+    Returns a list of arc dicts with x_points, y_points, arc_x, arc_y for drawing.
+    """
+    peaks, _ = find_peaks(prices, distance=window)
+    troughs, _ = find_peaks(-prices, distance=window)
+    
+    arcs = []
+    
+    if len(peaks) < 2 or len(troughs) < 1:
+        return arcs
+    
+    # Pair consecutive Peak-Trough-Peak sequences
+    all_points = sorted(
+        [(i, prices[i], 'peak') for i in peaks] + [(i, prices[i], 'trough') for i in troughs],
+        key=lambda x: x[0]
+    )
+    
+    # Find valid P-T-P triplets for arc fitting
+    for i in range(len(all_points) - 2):
+        p1, t, p2 = all_points[i], all_points[i+1], all_points[i+2]
+        if p1[2] == 'peak' and t[2] == 'trough' and p2[2] == 'peak':
+            # Only keep arcs where the second peak is lower (contraction)
+            if p2[1] < p1[1] * 0.98:
+                x_points = [p1[0], t[0], p2[0]]
+                y_points = [p1[1], t[1], p2[1]]
+                
+                # Quadratic curve fitting for smooth arc
+                f_arc = interp1d(x_points, y_points, kind='quadratic')
+                x_new = np.linspace(x_points[0], x_points[-1], 100)
+                y_new = f_arc(x_new)
+                
+                # Filter out-of-bound indices
+                valid_mask = x_new.astype(int) < len(dates)
+                x_new = x_new[valid_mask]
+                y_new = y_new[valid_mask]
+                
+                if len(x_new) > 0:
+                    arc_dates = dates[x_new.astype(int)]
+                    contraction_pct = (p1[1] - p2[1]) / p1[1] * 100
+                    
+                    arcs.append({
+                        'peak1_date': dates[p1[0]],
+                        'peak1_price': p1[1],
+                        'trough_date': dates[t[0]],
+                        'trough_price': t[1],
+                        'peak2_date': dates[p2[0]],
+                        'peak2_price': p2[1],
+                        'contraction_pct': contraction_pct,
+                        'arc_dates': arc_dates,
+                        'arc_prices': y_new,
+                    })
+    
+    return arcs
+
+
 def detect_vcp_pattern(df, lookback=60):
     """
-    檢測 VCP (Volatility Contraction Pattern) - MarketSmith 風格
-    返回收縮波信息: T1, T2, T3 等
+    Detect VCP using arc-based contraction detection.
+    Returns contraction wave info (T1, T2, ...) and arc data for charting.
     """
-    df = df.copy()
-    
-    highs = df['High'].values
+    prices = df['High'].values
     dates = df.index.values
     
-    pivot_highs = []
-    for i in range(2, len(highs) - 2):
-        if highs[i] > highs[i-1] and highs[i] > highs[i-2] and \
-           highs[i] > highs[i+1] and highs[i] > highs[i+2]:
-            pivot_highs.append({
-                'date': df.index[i],
-                'price': highs[i],
-                'idx': i
-            })
+    arcs = detect_vcp_arcs(prices, dates, window=max(5, len(prices) // 30))
     
     contractions = []
-    wave_num = 0
-    prev_high = None
-    
-    for pivot in pivot_highs[-6:]:
-        if prev_high is not None:
-            if pivot['price'] < prev_high * 0.98:
-                wave_num += 1
-                contraction_pct = (prev_high - pivot['price']) / prev_high * 100
-                contractions.append({
-                    'wave': f'T{wave_num}',
-                    'date': pivot['date'],
-                    'price': pivot['price'],
-                    'prev_price': prev_high,
-                    'contraction_pct': contraction_pct
-                })
-        prev_high = pivot['price']
+    for i, arc in enumerate(arcs):
+        contractions.append({
+            'wave': f'T{i+1}',
+            'date': arc['peak2_date'],
+            'price': arc['peak2_price'],
+            'prev_price': arc['peak1_price'],
+            'contraction_pct': arc['contraction_pct'],
+            'arc_dates': arc['arc_dates'],
+            'arc_prices': arc['arc_prices'],
+            'peak1_date': arc['peak1_date'],
+            'peak1_price': arc['peak1_price'],
+            'trough_date': arc['trough_date'],
+            'trough_price': arc['trough_price'],
+            'peak2_date': arc['peak2_date'],
+            'peak2_price': arc['peak2_price'],
+        })
     
     return contractions
 
@@ -122,7 +171,11 @@ def calculate_daily_signals(df, benchmark_df, params=None):
     
     df['Signal'] = df['VCP_Signal'] & df['Breakout']
     
-    df['VCP_Contractions'] = [detect_vcp_pattern(df)] * len(df)
+    vcp_contractions = detect_vcp_pattern(df)
+    df['VCP_Contractions'] = [vcp_contractions] * len(df)
+    
+    # Store arcs separately for chart drawing
+    df['VCP_Arcs'] = [vcp_contractions] * len(df)
     
     return df
 

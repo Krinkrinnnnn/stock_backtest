@@ -176,16 +176,16 @@ State is saved to `market_health/screen_result/market_regime.json`.
 
 ```bash
 # Full analysis (Health + Risk Appetite + Decision)
-docker compose run --rm harbor-engine python market_health/market_regime.py
+python market_health/market_regime.py
 
 # Force fresh download (ignore all caches)
-docker compose run --rm harbor-engine python market_health/market_regime.py --force-refresh
+python market_health/market_regime.py --force-refresh
 
 # Send to Discord (with embed + chart)
-docker compose run --rm harbor-engine python notifier.py
+python notifier.py
 
 # Oversold screener (for ACCUMULATION / HARD_MONEY regimes)
-docker compose run --rm harbor-engine python screen/oversold_screener.py
+python screen/screen_main.py --screener oversold
 ```
 
 ---

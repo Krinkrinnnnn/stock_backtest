@@ -75,7 +75,7 @@ def load_tickers():
         return list(dict.fromkeys(tickers))
 
     # Fallback: S&P 500 from Wikipedia
-    print("  📥 Fetching S&P 500 from Wikipedia...")
+    print("   Fetching S&P 500 from Wikipedia...")
     try:
         url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
         headers = {'User-Agent': 'Mozilla/5.0'}
@@ -84,7 +84,7 @@ def load_tickers():
         tickers = [t.replace('.', '-') for t in tickers]
         return list(dict.fromkeys(tickers))
     except Exception as e:
-        print(f"  ❌ Failed to load tickers: {e}")
+        print(f"  [X] Failed to load tickers: {e}")
         return []
 
 
@@ -110,7 +110,7 @@ def save_cached_data(df):
     try:
         df.to_parquet(CACHE_PATH)
     except Exception as e:
-        print(f"  ⚠️ Cache save failed: {e}")
+        print(f"  [!] Cache save failed: {e}")
 
 
 # ==========================================
@@ -127,10 +127,10 @@ def download_data(tickers, period="250d"):
                 cached.columns = cached.columns.get_level_values(0)
             close_cols = [c for c in cached.columns.get_level_values(0) if c in tickers] if isinstance(cached.columns, pd.MultiIndex) else [c for c in cached.columns if c in tickers]
             if len(close_cols) >= len(tickers) * 0.5:
-                print(f"  ✅ Cache: {len(cached)} rows, {len(close_cols)} tickers")
+                print(f"  [OK] Cache: {len(cached)} rows, {len(close_cols)} tickers")
                 return cached
 
-    print(f"  📥 Downloading {len(tickers)} tickers ({period})...")
+    print(f"   Downloading {len(tickers)} tickers ({period})...")
 
     # Chunked download to avoid rate limiting
     chunk_size = 200
@@ -146,13 +146,13 @@ def download_data(tickers, period="250d"):
             if data is not None and not data.empty:
                 all_chunks.append(data)
         except Exception as e:
-            print(f"    ⚠️ Chunk {chunk_num} failed: {e}")
+            print(f"    [!] Chunk {chunk_num} failed: {e}")
 
         if i + chunk_size < len(tickers):
             time.sleep(1)  # Rate limit pause
 
     if not all_chunks:
-        print("  ❌ No data downloaded")
+        print("  [X] No data downloaded")
         return pd.DataFrame()
 
     # Merge chunks — each chunk has columns like (ticker, Close) or just Close
@@ -173,12 +173,12 @@ def download_data(tickers, period="250d"):
                 close_frames[list(chunk_data.columns)[0]] = chunk_data["Close"]
 
     if not close_frames:
-        print("  ❌ No Close prices found")
+        print("  [X] No Close prices found")
         return pd.DataFrame()
 
     combined = pd.DataFrame(close_frames)
     save_cached_data(combined)
-    print(f"  ✅ Downloaded {len(combined)} rows, {len(combined.columns)} tickers")
+    print(f"  [OK] Downloaded {len(combined)} rows, {len(combined.columns)} tickers")
     return combined
 
 
@@ -363,7 +363,7 @@ def enrich_with_volume(candidates: list[dict]) -> list[dict]:
         return []
 
     tickers = [c["ticker"] for c in candidates]
-    print(f"\n  📊 Checking volume for {len(tickers)} candidates...")
+    print(f"\n   Checking volume for {len(tickers)} candidates...")
 
     enriched = []
     for ticker in tickers:
@@ -393,13 +393,13 @@ def enrich_with_volume(candidates: list[dict]) -> list[dict]:
                 candidate["vol_avg_20d"] = int(avg_vol_20)
                 candidate["vol_ratio"] = vol_ratio
                 enriched.append(candidate)
-                print(f"    ✅ {ticker}: Vol {vol_ratio}x | Close {close_today:.2f} >= Open {open_today:.2f}")
+                print(f"    [OK] {ticker}: Vol {vol_ratio}x | Close {close_today:.2f} >= Open {open_today:.2f}")
             else:
                 reason = "Volume too low" if vol_ratio < 1.2 else "Bearish candle (Close < Open)"
-                print(f"    ❌ {ticker}: {reason}")
+                print(f"    [X] {ticker}: {reason}")
 
         except Exception as e:
-            print(f"    ⚠️ {ticker}: {e}")
+            print(f"    [!] {ticker}: {e}")
 
     return enriched
 
@@ -411,33 +411,33 @@ def enrich_with_volume(candidates: list[dict]) -> list[dict]:
 def run_screener(tickers=None):
     """Run the full oversold Spring Trap screener."""
     print(f"\n{'='*60}")
-    print(f"  🔍 OVERSOLD SCREENER — Spring Trap Setup")
+    print(f"  [SEARCH] OVERSOLD SCREENER — Spring Trap Setup")
     print(f"  {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"{'='*60}")
 
     # ── Regime warning ──
     regime = check_market_regime()
     if regime and "EASY_MONEY" in regime.upper():
-        print(f"\n  ⚠️  Market is in {regime}.")
+        print(f"\n  [!]  Market is in {regime}.")
         print(f"      Oversold screener may underperform. VCP breakouts are preferred.\n")
 
     # ── Load tickers ──
     if tickers is None:
         tickers = load_tickers()
     if not tickers:
-        print("  ❌ No tickers available")
+        print("  [X] No tickers available")
         return pd.DataFrame()
 
-    print(f"\n  📋 {len(tickers)} tickers loaded")
+    print(f"\n  [LIST] {len(tickers)} tickers loaded")
 
     # ── Download data ──
     close_data = download_data(tickers, period="250d")
     if close_data.empty:
-        print("  ❌ No data available")
+        print("  [X] No data available")
         return pd.DataFrame()
 
     # ── Parallel analysis (price-based criteria) ──
-    print(f"\n  🔎 Screening for Spring Trap (Price > 200MA, RSI < 30, Price < 50MA)...")
+    print(f"\n  [SEARCH] Screening for Spring Trap (Price > 200MA, RSI < 30, Price < 50MA)...")
 
     # Build args list: (ticker, series)
     args_list = []
@@ -450,17 +450,17 @@ def run_screener(tickers=None):
         results = pool.map(analyze_stock, args_list)
 
     price_pass = [r for r in results if r is not None]
-    print(f"  📊 {len(price_pass)} tickers passed price criteria")
+    print(f"   {len(price_pass)} tickers passed price criteria")
 
     if not price_pass:
-        print("  ❌ No Spring Trap candidates found")
+        print("  [X] No Spring Trap candidates found")
         return pd.DataFrame()
 
     # ── Volume climax filter ──
     final_candidates = enrich_with_volume(price_pass)
 
     if not final_candidates:
-        print("  ❌ No candidates passed volume climax filter")
+        print("  [X] No candidates passed volume climax filter")
         return pd.DataFrame()
 
     # ── Sort by RSI (lowest first = most oversold) ──
@@ -477,7 +477,7 @@ def run_screener(tickers=None):
     # ── Save to CSV ──
     df = pd.DataFrame(final_candidates)
     df.to_csv(OUTPUT_CSV, index=False)
-    print(f"\n  💾 Saved {len(df)} candidates to: {OUTPUT_CSV}")
+    print(f"\n  [SAVE] Saved {len(df)} candidates to: {OUTPUT_CSV}")
 
     return df
 
@@ -488,13 +488,36 @@ def run_screener(tickers=None):
 
 if __name__ == "__main__":
     import argparse
+    sys.path.insert(0, os.path.join(SCREEN_DIR, ".."))
+    from filters import filter_by_market_cap
+
     parser = argparse.ArgumentParser(description="Oversold Screener — Spring Trap")
     parser.add_argument("--tickers", nargs="+", help="Custom tickers to screen")
     parser.add_argument("--force-refresh", action="store_true", help="Ignore cache")
+    parser.add_argument("--blue-chip-only", action="store_true",
+                        help="Only mega-cap blue chips (>$200B market cap)")
+    parser.add_argument("--exclude-blue-chip", action="store_true",
+                        help="Exclude mega-caps (keep stocks <$100B)")
     args = parser.parse_args()
 
     if args.force_refresh:
         FORCE_REFRESH = True
-        print("  🔄 Force refresh enabled")
+        print("  [REFRESH] Force refresh enabled")
 
-    run_screener(tickers=args.tickers)
+    tickers = args.tickers
+    if tickers is None:
+        tickers = load_tickers()
+
+    # Apply market cap filter before running screener
+    if args.blue_chip_only:
+        print("  [BLUE CHIP] Filter: keeping only stocks >$200B market cap")
+        tickers = filter_by_market_cap(tickers, min_cap_billions=200)
+    elif args.exclude_blue_chip:
+        print("  [MID CAP] Filter: keeping stocks <$100B market cap")
+        tickers = filter_by_market_cap(tickers, max_cap_billions=100)
+
+    if not tickers:
+        print("  [X] No tickers after filtering")
+        sys.exit(1)
+
+    run_screener(tickers=tickers)

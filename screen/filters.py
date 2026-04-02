@@ -16,6 +16,7 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import warnings
 
 warnings.filterwarnings("ignore")
@@ -773,3 +774,49 @@ if __name__ == "__main__":
         print(f"  Passes (>={details['min_adr_percent']:.1f}%): {'YES' if passes else 'NO'}")
     
     print("\n" + "="*70)
+
+
+def _fetch_market_cap(ticker):
+    """Fetch market cap for a single ticker using fast_info."""
+    try:
+        cap = yf.Ticker(ticker).fast_info.get("marketCap")
+        if cap and cap > 0:
+            return ticker, float(cap)
+    except Exception:
+        pass
+    return ticker, None
+
+
+def filter_by_market_cap(tickers, min_cap_billions=0, max_cap_billions=float('inf')):
+    """
+    Filter tickers by market cap range using multi-threaded fast_info lookup.
+
+    Args:
+        tickers: List of ticker symbols.
+        min_cap_billions: Minimum market cap in billions (inclusive).
+        max_cap_billions: Maximum market cap in billions (exclusive).
+
+    Returns:
+        list: Tickers within the specified market cap range.
+             Tickers with missing/NaN market cap are excluded.
+    """
+    if not tickers:
+        return []
+
+    cap_map = {}
+    with ThreadPoolExecutor(max_workers=min(20, len(tickers))) as executor:
+        futures = {executor.submit(_fetch_market_cap, t): t for t in tickers}
+        for future in as_completed(futures):
+            ticker, cap = future.result()
+            if cap is not None:
+                cap_map[ticker] = cap / 1e9  # Convert to billions
+
+    filtered = [
+        t for t in tickers
+        if t in cap_map and min_cap_billions <= cap_map[t] < max_cap_billions
+    ]
+
+    print(f"  Market Cap Filter: {len(filtered)}/{len(tickers)} passed "
+          f"(${min_cap_billions}B - ${max_cap_billions}B)")
+
+    return sorted(filtered)

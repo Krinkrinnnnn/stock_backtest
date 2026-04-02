@@ -5,20 +5,42 @@ Multiple stock screening strategies, all runnable from `screen/screen_main.py`.
 ## Quick Start
 
 ```bash
-# Run all screeners
-docker compose run --rm harbor-engine python screen/screen_main.py --screener all
+# Run all screeners (outputs to screen/screen_result/screen_all_<timestamp>/)
+python screen/screen_main.py --screener all
 
-# Run specific screener
-docker compose run --rm harbor-engine python screen/screen_main.py --screener stage2
-docker compose run --rm harbor-engine python screen/screen_main.py --screener momentum
-docker compose run --rm harbor-engine python screen/screen_main.py --screener week10_momentum
-docker compose run --rm harbor-engine python screen/screen_main.py --screener oversold
+# Run specific screener (outputs to screen/screen_result/)
+python screen/screen_main.py --screener stage2
+python screen/screen_main.py --screener momentum
+python screen/screen_main.py --screener week10_momentum
+python screen/screen_main.py --screener oversold
 
 # With custom tickers
-docker compose run --rm harbor-engine python screen/screen_main.py --screener stage2 --tickers AAPL NVDA TSLA
+python screen/screen_main.py --screener stage2 --tickers AAPL NVDA TSLA
 
 # Screener → Backtest pipeline
-docker compose run --rm harbor-engine python screen/backtest_runner.py --screener momentum --top-k 5
+python screen/backtest_runner.py --screener momentum --top-k 5
+```
+
+## Output Files
+
+Each screener run produces **2 files**:
+
+| File | Format | Content |
+|---|---|---|
+| `screener_<name>.txt` | Plain text | One passing ticker per line |
+| `screener_<name>.xlsx` | Excel | Full results — all tickers, all metrics, sector column |
+
+When running `--screener all`, all outputs are saved to a single session folder:
+```
+screen/screen_result/screen_all_2026-04-02_16-44/
+├── screener_stage2.txt
+├── screener_stage2.xlsx
+├── screener_momentum.txt
+├── screener_momentum.xlsx
+├── screener_week10_momentum.txt
+├── screener_week10_momentum.xlsx
+├── screener_oversold.txt
+└── screener_oversold.xlsx
 ```
 
 ## CLI Arguments — `screen/screen_main.py`
@@ -46,6 +68,7 @@ screen/
 ├── tickers.py               # US stock ticker fetcher (NASDAQ FTP)
 ├── correlation.py           # Correlation risk analysis
 ├── backtest_runner.py       # Screener → Backtest pipeline
+├── screen_result/           # Output directory (txt + xlsx files)
 └── screener_list/
     ├── __init__.py
     ├── stage2_screener.py   # Minervini Stage 2
@@ -183,6 +206,23 @@ Finds high-quality stocks that are temporarily oversold (mean reversion).
 3. Below short-term average: Price < 50-day SMA
 4. Volume climax: Volume > 1.2x 20-day avg volume + bullish candle
 
+#### CLI Arguments
+
+| Argument | Description |
+|---|---|
+| `--tickers` | Custom ticker list |
+| `--force-refresh` | Ignore cache |
+| `--blue-chip-only` | Only mega-cap blue chips (>$200B market cap) |
+| `--exclude-blue-chip` | Exclude mega-caps (keep stocks <$100B) |
+
+```bash
+# Only blue chips (AAPL, NVDA, META, etc.)
+python screen/screener_list/oversold_screener.py --blue-chip-only
+
+# Exclude mega-caps, find mid-cap oversold plays
+python screen/screener_list/oversold_screener.py --exclude-blue-chip
+```
+
 #### `run_screener(tickers=None)`
 
 | Param | Type | Default | Description |
@@ -275,6 +315,24 @@ Checks Average Daily Range >= 4%. Returns `(passes, details)`.
 #### `check_earnings(ticker, params=None)`
 
 Flags stocks within 7 days before or 1 day after earnings. Returns `(passes, details)`.
+
+#### `filter_by_market_cap(tickers, min_cap_billions=0, max_cap_billions=inf)`
+
+| Param | Type | Default | Description |
+|---|---|---|---|
+| `tickers` | list | required | Ticker symbols |
+| `min_cap_billions` | float | `0` | Minimum market cap in billions |
+| `max_cap_billions` | float | `inf` | Maximum market cap in billions |
+
+Multi-threaded market cap filter using `yfinance.fast_info`. Tickers with missing cap data are excluded. Returns filtered list.
+
+```bash
+# Only mega-caps >$200B
+python screen/screener_list/oversold_screener.py --blue-chip-only
+
+# Exclude mega-caps <$100B
+python screen/screener_list/oversold_screener.py --exclude-blue-chip
+```
 
 ### `tickers.py`
 
